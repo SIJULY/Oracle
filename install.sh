@@ -11,7 +11,7 @@ SERVICE_NAME="ociapp"
 
 # --- 脚本开始 ---
 echo "================================================="
-echo "  OCI Web Panel Installer (Caddy Version)  "
+echo "  OCI Web Panel Installer (Caddy Coexistence Version)  "
 echo "================================================="
 
 # 1. 更新系统并安装基础依赖
@@ -20,20 +20,18 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y python3-pip python3-venv git curl debian-keyring debian-archive-keyring apt-transport-https
 
-# 2. 清理并安装 Caddy Web 服务器
-echo ">>> [2/7] Cleaning up old Caddy and installing fresh..."
-# 停止并禁用任何可能正在运行的 Caddy 服务
-systemctl stop caddy 2>/dev/null || true
-systemctl disable caddy 2>/dev/null || true
-# 完全卸载并清除旧的 Caddy 包及其配置文件
-apt-get purge caddy -y 2>/dev/null || true
-rm -f /etc/caddy/Caddyfile
-
-# 通过官方源全新安装 Caddy
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-apt-get update
-apt-get install -y caddy
+# 2. 安装 Caddy Web 服务器 (如果尚未安装)
+echo ">>> [2/7] Checking and installing Caddy..."
+if ! command -v caddy &> /dev/null
+then
+    echo "Caddy not found. Installing now..."
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+    apt-get update
+    apt-get install -y caddy
+else
+    echo "Caddy is already installed. Skipping installation."
+fi
 
 # 3. 检查项目文件 (因为我们现在在项目目录里运行)
 echo ">>> [3/7] Verifying project files in current directory..."
@@ -73,24 +71,31 @@ Restart=always
 WantedBy=multi-user.target
 EOF
 
-# 6. 配置 Caddy 作为反向代理
-echo ">>> [6/7] Configuring Caddy..."
+# 6. 配置 Caddy 以实现并存
+echo ">>> [6/7] Configuring Caddy for coexistence..."
 SERVER_IP=$(curl -s -4 ifconfig.me || echo "")
 if [ -z "$SERVER_IP" ]; then
     echo "警告：无法自动获取公网IP地址。将使用 'localhost' 作为备用地址。"
-    echo "您需要手动修改 /etc/caddy/Caddyfile 文件中的地址才能从公网访问。"
     SERVER_IP="localhost"
 else
     echo "成功获取到公网IP: ${SERVER_IP}"
 fi
 
-cat <<EOF > /etc/caddy/Caddyfile
+# 为我们的应用创建独立的配置文件
+mkdir -p /etc/caddy/conf.d
+cat <<EOF > /etc/caddy/conf.d/${SERVICE_NAME}.caddy
 # Caddyfile for ${SERVICE_NAME}
 
 http://${SERVER_IP} {
     reverse_proxy 127.0.0.1:5003
 }
 EOF
+
+# 确保主 Caddyfile 导入了我们的配置目录
+if ! grep -q "import /etc/caddy/conf.d/*.caddy" /etc/caddy/Caddyfile; then
+    echo "Adding 'import' directive to main Caddyfile..."
+    echo -e "\nimport /etc/caddy/conf.d/*.caddy" >> /etc/caddy/Caddyfile
+fi
 
 # 7. 启动并启用服务
 echo ">>> [7/7] Starting and enabling services..."
@@ -105,17 +110,6 @@ echo "================================================="
 echo "🎉 部署完成！"
 echo "您的应用现在应该可以通过以下地址访问："
 echo "http://${SERVER_IP}"
+echo "您现有的 Caddy 站点应该不受影响。"
 echo "================================================="
-```
-
-### **下一步操作**
-
-1.  用上面提供的代码**完整替换**您GitHub仓库中的 `install.sh` 文件。
-
-2.  回到您的服务器，您不需要再手动清理任何东西了。因为脚本已经下载了最新的代码，您只需要重新运行它即可。
-
-    请在 `~/Oracle` 目录下，直接运行：
-    ```bash
-    sudo ./install.sh
-    
 
