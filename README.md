@@ -24,7 +24,7 @@
 2.  运行下面的一行命令，并确保将 URL 替换为您自己的 GitHub 仓库地址。
 
     ```bash
-    git clone https://github.com/SIJULY/Oracle.git && cd azure && chmod +x install.sh && sudo ./install.sh
+    git clone https://github.com/SIJULY/Oracle.git && cd Oracle && chmod +x install.sh && sudo ./install.sh
     ```
 
 ## 🖥️ 第三步：使用Web面板
