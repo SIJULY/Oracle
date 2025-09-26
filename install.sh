@@ -20,8 +20,16 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y python3-pip python3-venv git curl debian-keyring debian-archive-keyring apt-transport-https
 
-# 2. 安装 Caddy Web 服务器
-echo ">>> [2/7] Installing Caddy Web Server..."
+# 2. 清理并安装 Caddy Web 服务器
+echo ">>> [2/7] Cleaning up old Caddy and installing fresh..."
+# 停止并禁用任何可能正在运行的 Caddy 服务
+systemctl stop caddy 2>/dev/null || true
+systemctl disable caddy 2>/dev/null || true
+# 完全卸载并清除旧的 Caddy 包及其配置文件
+apt-get purge caddy -y 2>/dev/null || true
+rm -f /etc/caddy/Caddyfile
+
+# 通过官方源全新安装 Caddy
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
 apt-get update
@@ -46,7 +54,6 @@ deactivate
 
 # 5. 清理并创建 systemd 服务文件
 echo ">>> [5/7] Creating systemd service for the application..."
-# 停止并禁用任何可能存在的旧服务，忽略错误
 systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
 systemctl disable "${SERVICE_NAME}.service" 2>/dev/null || true
 
@@ -105,20 +112,10 @@ echo "================================================="
 
 1.  用上面提供的代码**完整替换**您GitHub仓库中的 `install.sh` 文件。
 
-2.  回到您的服务器，您需要先**清理一下旧的安装**，以确保一个干净的环境。请运行以下命令：
-    ```bash
-    # 停止并禁用任何残留的服务
-    sudo systemctl stop ociapp caddy 2>/dev/null || true
-    sudo systemctl disable ociapp caddy 2>/dev/null || true
-    # 删除所有相关的旧文件
-    sudo rm -f /etc/systemd/system/ociapp.service
-    sudo rm -f /etc/caddy/Caddyfile
-    sudo rm -rf /root/oci-web-app
-    sudo rm -rf ~/Oracle
-    ```
+2.  回到您的服务器，您不需要再手动清理任何东西了。因为脚本已经下载了最新的代码，您只需要重新运行它即可。
 
-3.  现在，您可以从一个**完全干净的状态**，重新运行您的一键安装命令了：
+    请在 `~/Oracle` 目录下，直接运行：
     ```bash
-    git clone https://github.com/SIJULY/Oracle.git && cd Oracle && chmod +x install.sh && sudo ./install.sh
+    sudo ./install.sh
     
 
