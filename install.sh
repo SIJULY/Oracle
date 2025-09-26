@@ -23,6 +23,7 @@ apt-get install -y python3-pip python3-venv git curl debian-keyring debian-archi
 
 # 2. 安装 Caddy Web 服务器
 echo ">>> [2/7] Installing Caddy Web Server..."
+# This part is idempotent and safe to run again
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
 apt-get update
@@ -65,7 +66,16 @@ EOF
 
 # 6. 配置 Caddy 作为反向代理
 echo ">>> [6/7] Configuring Caddy..."
-SERVER_IP=$(curl -s -4 ifconfig.me)
+# 【重要修正】增加对IP获取失败的判断
+SERVER_IP=$(curl -s -4 ifconfig.me || echo "")
+if [ -z "$SERVER_IP" ]; then
+    echo "警告：无法自动获取公网IP地址。将使用 'localhost' 作为备用地址。"
+    echo "您需要手动修改 /etc/caddy/Caddyfile 文件中的地址才能从公网访问。"
+    SERVER_IP="localhost"
+else
+    echo "成功获取到公网IP: ${SERVER_IP}"
+fi
+
 cat <<EOF > /etc/caddy/Caddyfile
 # Caddyfile for ${SERVICE_NAME}
 
@@ -89,3 +99,25 @@ echo "🎉 Deployment complete!"
 echo "Your application should now be accessible at:"
 echo "http://${SERVER_IP}"
 echo "================================================="
+```
+
+### **下一步操作**
+
+1.  用上面提供的代码**完整替换**您GitHub仓库中的 `install.sh` 文件。
+2.  回到您的服务器，您需要先清理一下旧的安装。运行：
+    ```bash
+    # 停止并禁用旧的服务
+    sudo systemctl stop ociapp
+    sudo systemctl disable ociapp
+    # 删除旧的配置文件
+    sudo rm /etc/systemd/system/ociapp.service
+    sudo rm /etc/nginx/sites-available/ociapp /etc/nginx/sites-enabled/ociapp 2>/dev/null || true # 忽略错误
+    sudo rm /etc/caddy/Caddyfile
+    # 删除旧的项目目录
+    sudo rm -rf /root/oci-web-app
+    ```
+3.  现在，您可以从一个干净的状态，重新运行您的一键安装命令了：
+    ```bash
+    git clone https://github.com/SIJULY/Oracle.git && cd Oracle && chmod +x install.sh && sudo ./install.sh
+    
+
