@@ -2,7 +2,7 @@
 set -e
 
 # ===================================================
-# OCI Web Panel - 最终安全版一键安装脚本
+# OCI Web Panel - 最终优化版一键安装脚本
 # 作者: @小龙女她爸
 # GitHub: https://github.com/SIJULY/Oracle
 # ===================================================
@@ -20,20 +20,19 @@ echo "📦 开始安装 OCI Web Panel..."
 
 # --- 1. 更新系统并安装依赖 ---
 echo "➡️ 步骤 1/7: 更新系统并安装依赖..."
-apt update && apt upgrade -y > /dev/null 2>&1
-# 安装 redis 和 git。caddy 和 python 工具会单独检查安装。
-apt install -y redis-server git python3-venv python3-pip > /dev/null 2>&1
+apt update && apt upgrade -y
+apt install -y redis-server git python3-venv python3-pip
 
 # --- 检查并安装 Caddy ---
 echo "➡️ 步骤 2/7: 检查并安装 Caddy..."
 if ! command -v caddy &> /dev/null
 then
     echo "Caddy 未安装，正在为您安装..."
-    apt install -y debian-keyring debian-archive-keyring apt-transport-https curl > /dev/null 2>&1
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg > /dev/null 2>&1
-    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
-    apt update > /dev/null 2>&1
-    apt install caddy > /dev/null 2>&1
+    apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+    apt update
+    apt install caddy
     echo "Caddy 安装完毕。"
 else
     echo "Caddy 已安装，跳过。"
@@ -52,8 +51,8 @@ echo "➡️ 步骤 4/7: 配置 Python 环境..."
 cd $APP_DIR
 python3 -m venv $PYTHON_ENV
 source $PYTHON_ENV/bin/activate
-pip install --upgrade pip > /dev/null 2>&1
-pip install -r $APP_DIR/requirements.txt > /dev/null 2>&1
+pip install --upgrade pip
+pip install -r $APP_DIR/requirements.txt
 deactivate
 
 # --- 4. 交互式设置密码 ---
@@ -105,7 +104,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now redis-server ociapp.service celery_worker.service > /dev/null 2>&1
+systemctl enable --now redis-server ociapp.service celery_worker.service
 systemctl restart redis-server ociapp.service celery_worker.service
 
 # --- 6. 配置 Caddy ---
@@ -131,7 +130,7 @@ EOF
 
 # 检查主 Caddyfile 并安全地添加 import 语句
 IMPORT_LINE="import $CADDY_CONF_DIR/*.caddy"
-if ! grep -qF "$IMPORT_LINE" "$CADDY_MAIN_FILE"; then
+if ! grep -qF "$IMPORT_LINE" "$CADDY_MAIN_FILE" 2>/dev/null; then
     echo "✅ 正在向主 Caddyfile 添加 import 语句..."
     # 使用 tee 和 sudo 权限来追加内容
     echo -e "\n$IMPORT_LINE" | sudo tee -a "$CADDY_MAIN_FILE" > /dev/null
