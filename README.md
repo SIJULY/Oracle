@@ -34,6 +34,9 @@ wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x
 
 ---
 
+<img width="1671" height="1688" alt="f987481b-9d8f-466a-a746-68e4853d8a2b" src="https://github.com/user-attachments/assets/3a974d92-ec65-417e-b432-ae97eae5735c" />
+
+
 ## 🚀 部署教程
 
 > 本教程以在一个全新的 **Ubuntu 22.04 VPS** 上部署为例。
