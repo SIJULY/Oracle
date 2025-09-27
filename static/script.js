@@ -1,4 +1,3 @@
-// FINAL COMPLETE VERSION
 document.addEventListener('DOMContentLoaded', function() {
     // DOM 元素获取
     const profileList = document.getElementById('profileList');
@@ -80,18 +79,20 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 profileNames.forEach(name => {
                     const tr = document.createElement('tr');
+                    // --- ↓↓↓ 本次唯一的修改点在这里：改回 text-end ↓↓↓ ---
                     tr.innerHTML = `
                         <td>${name}</td>
                         <td class="text-end action-buttons">
-                            <button class="btn btn-success btn-sm connect-btn" data-alias="${name}">连接</button>
-                            <button class="btn btn-info btn-sm edit-btn" data-alias="${name}"><i class="bi bi-pencil"></i> 编辑</button>
-                            <button class="btn btn-danger btn-sm delete-btn" data-alias="${name}"><i class="bi bi-trash"></i> 删除</button>
+                            <button class="btn btn-success btn-sm connect-btn profile-action-btn" data-alias="${name}">连接</button>
+                            <button class="btn btn-info btn-sm edit-btn profile-action-btn" data-alias="${name}"><i class="bi bi-pencil"></i> 编辑</button>
+                            <button class="btn btn-danger btn-sm delete-btn profile-action-btn" data-alias="${name}"><i class="bi bi-trash"></i> 删除</button>
                         </td>
                     `;
+                    // --- ↑↑↑ 本次唯一的修改点在这里 ↑↑↑ ---
                     profileList.appendChild(tr);
                 });
             }
-            checkSession();
+            checkSession(); 
         } catch (error) {
             profileList.innerHTML = `<tr><td colspan="2" class="text-center text-danger">加载账号列表失败</td></tr>`;
         }
@@ -116,15 +117,22 @@ document.addEventListener('DOMContentLoaded', function() {
             });
 
             profileData['default_ssh_public_key'] = sshKey;
-            profileData['key_content'] = await keyFile.text();
             
-            const payload = { alias, profile_data: profileData };
-            await apiRequest('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                profileData['key_content'] = event.target.result;
+                const payload = { alias, profile_data: profileData };
+                await apiRequest('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                addLog(`账号 ${alias} 添加成功!`, 'success');
+                [newProfileAlias, newProfileConfigText, newProfileSshKey].forEach(el => el.value = '');
+                newProfileKeyFile.value = '';
+                loadProfiles();
+            };
+            reader.readAsText(keyFile);
 
-            addLog(`账号 ${alias} 添加成功!`, 'success');
-            [newProfileAlias, newProfileConfigText, newProfileSshKey, newProfileKeyFile].forEach(el => el.value = '');
-            loadProfiles();
-        } catch (error) {}
+        } catch (error) {
+            addLog(`添加账号时出错: ${error.message}`, 'error');
+        }
     });
 
     profileList.addEventListener('click', async (e) => {
@@ -194,26 +202,33 @@ document.addEventListener('DOMContentLoaded', function() {
 
             profileData['default_ssh_public_key'] = sshKey;
             
-            if (keyFile) {
-                profileData['key_content'] = await keyFile.text();
-                addLog('检测到新的私钥文件，将进行更新。');
-            }
-            
-            if (originalAlias !== newAlias) {
-                if(confirm(`账号名称将从 "${originalAlias}" 更改为 "${newAlias}", 确定吗?`)){
-                    await apiRequest(`/api/profiles/${originalAlias}`, { method: 'DELETE' });
-                    addLog(`旧账号名称 ${originalAlias} 已删除。`);
-                } else {
-                    return;
+            const saveChanges = async (finalProfileData) => {
+                if (originalAlias !== newAlias) {
+                    if(confirm(`账号名称将从 "${originalAlias}" 更改为 "${newAlias}", 确定吗?`)){
+                        await apiRequest(`/api/profiles/${originalAlias}`, { method: 'DELETE' });
+                        addLog(`旧账号名称 ${originalAlias} 已删除。`);
+                    } else {
+                        return;
+                    }
                 }
-            }
-            
-            const payload = { alias: newAlias, profile_data: profileData };
-            await apiRequest('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                const payload = { alias: newAlias, profile_data: finalProfileData };
+                await apiRequest('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                addLog(`账号 ${newAlias} 保存成功!`, 'success');
+                editProfileModal.hide();
+                loadProfiles();
+            };
 
-            addLog(`账号 ${newAlias} 保存成功!`, 'success');
-            editProfileModal.hide();
-            loadProfiles();
+            if (keyFile) {
+                addLog('检测到新的私钥文件，将进行更新。');
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    profileData['key_content'] = event.target.result;
+                    saveChanges(profileData);
+                };
+                reader.readAsText(keyFile);
+            } else {
+                saveChanges(profileData);
+            }
         } catch (error) {}
     });
 
@@ -221,20 +236,37 @@ document.addEventListener('DOMContentLoaded', function() {
     async function checkSession() {
         try {
             const data = await apiRequest('/api/session');
+            
+            document.querySelectorAll('.connect-btn').forEach(btn => {
+                btn.textContent = '连接';
+                btn.classList.remove('btn-secondary');
+                btn.classList.add('btn-success');
+                btn.disabled = false;
+            });
+
             if (data.logged_in && data.alias) {
                 currentProfileStatus.textContent = `已连接: ${data.alias}`;
                 actionAreaProfile.textContent = `当前账号: ${data.alias}`;
                 actionAreaProfile.classList.remove('d-none');
                 enableMainControls(true, data.can_create, data.can_snatch);
                 refreshInstances();
+
+                const activeButton = document.querySelector(`.connect-btn[data-alias="${data.alias}"]`);
+                if (activeButton) {
+                    activeButton.textContent = '已连接';
+                    activeButton.classList.remove('btn-success');
+                    activeButton.classList.add('btn-secondary');
+                    activeButton.disabled = true;
+                }
             } else {
                 currentProfileStatus.textContent = '未连接';
                 actionAreaProfile.classList.add('d-none');
                 enableMainControls(false, false, false);
             }
         } catch (error) {
-             enableMainControls(false, false, false);
+             currentProfileStatus.textContent = '未连接 (会话检查失败)';
              actionAreaProfile.classList.add('d-none');
+             enableMainControls(false, false, false);
         }
     }
     
@@ -371,7 +403,6 @@ document.addEventListener('DOMContentLoaded', function() {
             runningTasksData = running;
             completedTasksData = completed;
 
-            // Populate running tasks
             runningSnatchTasksList.innerHTML = '';
             if (running.length === 0) {
                 runningSnatchTasksList.innerHTML = '<li class="list-group-item text-muted">没有正在运行的抢占任务。</li>';
@@ -385,7 +416,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             }
 
-            // Populate completed tasks
             completedSnatchTasksList.innerHTML = '';
              if (completed.length === 0) {
                 completedSnatchTasksList.innerHTML = '<li class="list-group-item text-muted">没有已完成的抢占任务记录。</li>';
@@ -456,7 +486,7 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             await apiRequest(`/api/tasks/${taskId}/stop`, { method: 'POST' });
             addLog(`已成功发送停止请求。`, 'success');
-            setTimeout(loadSnatchTasks, 2000); // Wait 2 seconds and refresh the lists
+            setTimeout(loadSnatchTasks, 2000);
         } catch(e) {}
     });
 
@@ -471,7 +501,7 @@ document.addEventListener('DOMContentLoaded', function() {
         try {
             await apiRequest(`/api/tasks/${taskId}`, { method: 'DELETE' });
             addLog('任务记录已删除。', 'success');
-            loadSnatchTasks(); // Refresh the lists
+            loadSnatchTasks();
         } catch(e) {}
     });
 
