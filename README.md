@@ -3,6 +3,12 @@
 这是一个基于 **Flask** 和 **Celery** 构建的 Web 应用，旨在提供一个图形化界面，用于管理 **Oracle Cloud Infrastructure (OCI)** 上的计算实例。
 它特别适合需要频繁创建、管理或“抢占”稀缺实例资源的用户。
 
+
+一键安装脚本：
+```bash
+wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x install.sh && ./install.sh
+```
+
 ---
 
 ## ✨ 功能特性
