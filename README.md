@@ -3,9 +3,6 @@
 这是一个基于 **Flask** 和 **Celery** 构建的 Web 应用，旨在提供一个图形化界面，用于管理 **Oracle Cloud Infrastructure (OCI)** 上的计算实例。
 它特别适合需要频繁创建、管理或“抢占”稀缺实例资源的用户。
 
-![应用截图](https://i.imgur.com/your-screenshot-url.png)
-*(提示：您可以将您的应用截图上传到图床，并替换上面的链接)*
-
 ---
 
 ## ✨ 功能特性
@@ -241,15 +238,3 @@ sudo systemctl restart nginx
 现在您可以通过浏览器访问服务器的 **IP 或域名**，输入在 `app.py` 中设置的密码，登录并开始使用 **OCI Web Panel** 🎉
 
 ---
-
-## 可选：在 README 中添加演示占位符
-
-如果您希望 README 更直观，可以添加快速预览 GIF 或演示视频占位符，例如：
-
-```markdown
-![演示 GIF](https://i.imgur.com/your-gif-url.gif)
-
-或
-
-[![演示视频缩略图](https://i.imgur.com/your-thumb.png)](htt
-```
