@@ -80,10 +80,120 @@ def generate_password(length=16):
 
 def get_oci_clients(profile_config):
     try:
-        oci.config.validate_config(profile_config)
-        return { "identity": oci.identity.IdentityClient(profile_config), "compute": oci.core.ComputeClient(profile_config), "vnet": oci.core.VirtualNetworkClient(profile_config), "bs": oci.core.BlockstorageClient(profile_config) }, None
+        # The key_content needs to be written to a temporary file for the SDK to read
+        if 'key_content' in profile_config and 'key_file' not in profile_config:
+            # Create a temporary file to hold the key
+            # This is a simplified approach; for production, consider a more secure temp file handling
+            key_file_path = f"/tmp/{uuid.uuid4()}.pem"
+            with open(key_file_path, 'w') as key_file:
+                key_file.write(profile_config['key_content'])
+            # Ensure proper permissions are set for the key file
+            os.chmod(key_file_path, 0o600)
+            
+            # Update a copy of the config to use this temp file
+            config_for_sdk = profile_config.copy()
+            config_for_sdk['key_file'] = key_file_path
+        else:
+            config_for_sdk = profile_config
+
+        oci.config.validate_config(config_for_sdk)
+        clients = { 
+            "identity": oci.identity.IdentityClient(config_for_sdk), 
+            "compute": oci.core.ComputeClient(config_for_sdk), 
+            "vnet": oci.core.VirtualNetworkClient(config_for_sdk), 
+            "bs": oci.core.BlockstorageClient(config_for_sdk) 
+        }
+
+        # Clean up the temporary file if it was created
+        if 'key_content' in profile_config and 'key_file' not in profile_config:
+            if os.path.exists(key_file_path):
+                os.remove(key_file_path)
+
+        return clients, None
     except Exception as e:
         return None, f"创建OCI客户端失败: {str(e)}"
+
+def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
+    """
+    确保给定的配置文件有可用的公共子网。
+    首先检查配置文件。如果未找到或无效，则创建一个新的VCN、
+    互联网网关和子网，然后将新的子网OCID保存到配置文件中。
+    """
+    profiles = load_profiles()
+    profile_config = profiles.get(alias, {})
+    subnet_id = profile_config.get('default_subnet_ocid')
+
+    # 1. 检查配置文件中是否已存在有效的子网OCID
+    if subnet_id:
+        try:
+            # 验证子网在OCI中是否仍然存在
+            get_subnet_response = vnet_client.get_subnet(subnet_id)
+            if get_subnet_response.data.lifecycle_state == 'AVAILABLE':
+                logging.info(f"使用账号 '{alias}' 中已配置的子网: ...{subnet_id[-12:]}")
+                return subnet_id
+        except ServiceError as e:
+            if e.status == 404:
+                logging.warning(f"配置文件中的子网 {subnet_id} 已不存在，将重新创建网络。")
+            else:
+                raise e # 重新引发其他意外错误
+
+    # 2. 如果未找到有效子网，则创建所有必要的网络资源
+    logging.info(f"账号 '{alias}' 未配置可用子网，开始自动创建网络资源...")
+    
+    # 创建VCN
+    vcn_name = f"vcn-autocreated-{alias}-{random.randint(100, 999)}"
+    vcn_details = CreateVcnDetails(
+        cidr_block="10.0.0.0/16",
+        display_name=vcn_name,
+        compartment_id=tenancy_ocid
+    )
+    vcn = vnet_client.create_vcn(vcn_details).data
+    # 等待VCN变为可用状态
+    oci.waiter.wait_for_resource(vnet_client, vnet_client.get_vcn(vcn.id), 'lifecycle_state', oci.core.models.Vcn.LIFECYCLE_STATE_AVAILABLE)
+    logging.info(f"VCN '{vcn_name}' ({vcn.id}) 已创建。")
+
+    # 创建互联网网关
+    ig_name = f"ig-autocreated-{alias}-{random.randint(100, 999)}"
+    ig_details = CreateInternetGatewayDetails(
+        display_name=ig_name,
+        compartment_id=tenancy_ocid,
+        is_enabled=True,
+        vcn_id=vcn.id
+    )
+    ig = vnet_client.create_internet_gateway(ig_details).data
+    # 等待互联网网关变为可用状态
+    oci.waiter.wait_for_resource(vnet_client, vnet_client.get_internet_gateway(ig.id), 'lifecycle_state', oci.core.models.InternetGateway.LIFECYCLE_STATE_AVAILABLE)
+    logging.info(f"Internet Gateway '{ig_name}' ({ig.id}) 已创建。")
+
+    # 更新默认路由表以允许互联网访问
+    route_table_id = vcn.default_route_table_id
+    route_rule = RouteRule(destination="0.0.0.0/0", network_entity_id=ig.id)
+    get_rt_response = vnet_client.get_route_table(route_table_id)
+    route_rules = get_rt_response.data.route_rules
+    route_rules.append(route_rule)
+    update_rt_details = UpdateRouteTableDetails(route_rules=route_rules)
+    vnet_client.update_route_table(route_table_id, update_rt_details)
+    logging.info(f"已更新路由表以允许公网访问。")
+
+    # 创建子网
+    subnet_name = f"subnet-autocreated-{alias}-{random.randint(100, 999)}"
+    subnet_details = CreateSubnetDetails(
+        compartment_id=tenancy_ocid,
+        vcn_id=vcn.id,
+        cidr_block="10.0.1.0/24",
+        display_name=subnet_name
+    )
+    subnet = vnet_client.create_subnet(subnet_details).data
+    # 等待子网变为可用状态
+    oci.waiter.wait_for_resource(vnet_client, vnet_client.get_subnet(subnet.id), 'lifecycle_state', oci.core.models.Subnet.LIFECYCLE_STATE_AVAILABLE)
+    logging.info(f"子网 '{subnet_name}' ({subnet.id}) 已创建。")
+
+    # 3. 将新的子网OCID保存回配置文件
+    profiles[alias]['default_subnet_ocid'] = subnet.id
+    save_profiles(profiles)
+    logging.info(f"已将新创建的子网ID保存到账号 '{alias}' 的配置中。")
+
+    return subnet.id
 
 # --- 装饰器 ---
 def login_required(f):
@@ -197,7 +307,9 @@ def delete_task_record(task_id):
 def stop_task(task_id):
     try:
         celery.control.revoke(task_id, terminate=True, signal='SIGKILL')
-        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', '任务已被用户手动停止。', task_id))
+        db = get_db()
+        db.execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', '任务已被用户手动停止。', task_id))
+        db.commit()
         return jsonify({"success": True, "message": f"停止任务 {task_id} 的请求已发送。"})
     except Exception as e:
         app.logger.error(f"停止任务 {task_id} 失败: {e}")
@@ -375,7 +487,7 @@ def _instance_action_task(task_id, profile_config, action, instance_id, data):
             try:
                 get_public_ip_details = oci.core.models.GetPublicIpByPrivateIpIdDetails(private_ip_id=primary_private_ip.id)
                 existing_public_ip = vnet_client.get_public_ip_by_private_ip_id(get_public_ip_details).data
-                if existing_public_ip.lifetime == oci.core.models.PublicIp.LIFETIME_EPHEMERAL:
+                if existing_public_ip.lifetime == oci.core.models.PublicIp.LIFECYCLE_EPHEMERAL:
                     vnet_client.delete_public_ip(existing_public_ip.id)
                     time.sleep(5)
             except ServiceError as e:
@@ -392,15 +504,16 @@ def _instance_action_task(task_id, profile_config, action, instance_id, data):
             subnet = vnet_client.get_subnet(subnet_id).data
             if not subnet.ipv6_cidr_block: raise Exception(f"子网 {subnet.display_name} 未配置IPv6 CIDR，无法分配地址。")
             
-            create_ipv6_details = CreateIpv6Details(vnic_id=vnic_id, ipv6_subnet_cidr=subnet.ipv6_cidr_block)
+            create_ipv6_details = CreateIpv6Details(vnic_id=vnic_id)
             new_ipv6 = vnet_client.create_ipv6(create_ipv6_details).data
             result_message = f"已成功请求IPv6地址。\n新IPv6地址: {new_ipv6.ip_address}"
         
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', result_message, task_id))
-
+        return result_message
     except Exception as e:
         error_message = f"操作 '{action_upper}' 失败: {str(e)}"
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
+        return error_message
 
 @celery.task
 def _create_instance_task(task_id, profile_config, alias, details):
@@ -457,10 +570,26 @@ runcmd:
         
         success_message = f"🎉 {len(created_instances_info)}个实例创建成功!\n    - 实例名: {', '.join(created_instances_info)}\n    - Root 密码: {root_password} (所有实例通用)"
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', success_message, task_id))
+        return success_message
+    except ServiceError as e:
+        # 专门捕获 OCI API 错误
+        if e.status == 500 and "Out of host capacity" in e.message:
+            error_message = f"❌ 实例创建失败! \n    - 原因: 资源不足，请稍后再试。"
+        else:
+            # 其他 OCI API 错误
+            error_message = f"❌ 实例创建失败! \n    - OCI API 错误: {str(e)}"
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
+        return error_message
     except Exception as e:
+        # 捕获所有其他非 OCI API 的异常
         error_message = f"❌ 实例创建失败! \n    - 原因: {str(e)}"
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
+        return error_message
 
+
+# ==============================================================================
+# vvvvvvvvvvvvvvvv   这是修改过的函数 vvvvvvvvvvvvvvvv
+# ==============================================================================
 @celery.task
 def _snatch_instance_task(task_id, profile_config, alias, details):
     _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '抢占任务开始...', task_id))
@@ -505,31 +634,60 @@ runcmd:
             source_details=oci.core.models.InstanceSourceViaImageDetails(image_id=image_ocid, boot_volume_size_in_gbs=details['boot_volume_size']),
             shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=details.get('ocpus'), memory_in_gbs=details.get('memory_in_gbs')) if "Flex" in shape else None)
         
-        retry_count = 0
-        min_delay = details.get('min_delay', 30)
-        max_delay = details.get('max_delay', 90)
-        while True:
-            retry_count += 1
-            try:
-                _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', f"第 {retry_count} 次尝试创建实例...", task_id))
-                instance = compute_client.launch_instance(launch_details).data
-                success_message = f"🎉 抢占成功 (第 {retry_count} 次尝试)!\n    - 实例名: {instance.display_name}\n    - Root 密码: {root_password}"
-                _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', success_message, task_id))
-                break
-            except ServiceError as e:
-                if e.status == 500 and ("OutOfCapacity" in e.code or "Out of host capacity" in e.message):
-                    delay = random.randint(min_delay, max_delay)
-                    status_msg = f"第 {retry_count} 次尝试失败：资源不足。将在 {delay} 秒后重试..."
-                    _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
-                    time.sleep(delay)
-                    continue
-                else:
-                    raise e
     except Exception as e:
-        error_message = f"❌ 抢占任务失败! \n    - 原因: {str(e)}"
+        # 如果在准备阶段就失败，则直接报告错误并终止任务
+        error_message = f"❌ 抢占任务准备阶段失败! \n    - 原因: {str(e)}"
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
+        return error_message
+
+    retry_count = 0
+    min_delay = details.get('min_delay', 30)
+    max_delay = details.get('max_delay', 90)
+
+    while True:
+        retry_count += 1
+        delay = random.randint(min_delay, max_delay)
+
+        # 检查任务是否已被外部命令停止
+        task_record = query_db('SELECT status FROM tasks WHERE id = ?', [task_id], one=True)
+        if task_record is None or task_record['status'] == 'failure':
+            logging.info(f"任务 {task_id} 已被外部停止，退出抢占循环。")
+            return "任务已被用户手动停止。"
+
+        try:
+            _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', f"第 {retry_count} 次尝试创建实例...", task_id))
+            instance = compute_client.launch_instance(launch_details).data
+            
+            success_message = f"🎉 抢占成功 (第 {retry_count} 次尝试)!\n    - 实例名: {instance.display_name}\n    - Root 密码: {root_password}"
+            _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', success_message, task_id))
+            return success_message
+
+        except ServiceError as e:
+            if e.status == 500 and ("OutOfCapacity" in e.code or "Out of host capacity" in e.message):
+                status_msg = f"第 {retry_count} 次尝试失败：资源不足。将在 {delay} 秒后重试..."
+                _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
+                time.sleep(delay)
+                # 继续下一次循环
+                continue
+            else:
+                # 其他可重试的OCI API错误
+                status_msg = f"第 {retry_count} 次尝试失败：API错误 ({e.code})。将在 {delay} 秒后重试..."
+                _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
+                time.sleep(delay)
+                continue
+        except Exception as e:
+            # 其他未知错误（如网络问题），也进行重试
+            status_msg = f"第 {retry_count} 次尝试失败：发生未知错误。将在 {delay} 秒后重试..."
+            _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
+            time.sleep(delay)
+            continue
+# ==============================================================================
+# ^^^^^^^^^^^^^^^^   这是修改过的函数   ^^^^^^^^^^^^^^^^
+# ==============================================================================
+
 
 # --- Main Execution ---
 init_db()
 if __name__ == '__main__':
-    app.run(debug=True, port=5003)
+    # 注意：在生产环境中应使用更强大的Web服务器，如Gunicorn或uWSGI
+    app.run(host='0.0.0.0', port=5003, debug=False)
