@@ -4,7 +4,7 @@
 它特别适合需要频繁创建、管理或“抢占”稀缺实例资源的用户。
 
 
-一键安装脚本：
+## ✨一键安装脚本：
 ```bash
 wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x install.sh && ./install.sh
 ```
