@@ -17,7 +17,7 @@ celery = Celery(app.import_name, backend=app.config['CELERY_RESULT_BACKEND'], br
 celery.conf.update(app.config)
 
 # --- General Configuration & Helpers ---
-PASSWORD = "You22kme#12345"
+PASSWORD = "asdsaSq$"
 KEYS_FILE = "oci_profiles.json"
 DATABASE = 'oci_tasks.db'
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
