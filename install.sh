@@ -1,16 +1,18 @@
 #!/bin/bash
 set -e
 
-# ============================================
-# OCI Web Panel - 最终优化版一键安装脚本
+# ===================================================
+# OCI Web Panel - 最终安全版一键安装脚本
 # 作者: @小龙女她爸
 # GitHub: https://github.com/SIJULY/Oracle
-# ============================================
+# ===================================================
 
 # --- 配置参数 ---
 APP_DIR="/root/Oracle"
 PYTHON_ENV="$APP_DIR/venv"
-CADDY_FILE="/etc/caddy/Caddyfile"
+CADDY_CONF_DIR="/etc/caddy/conf.d"
+CADDY_APP_CONF="$CADDY_CONF_DIR/oci-panel.caddy"
+CADDY_MAIN_FILE="/etc/caddy/Caddyfile"
 DEFAULT_PASSWORD="ChangeMe#12345"
 APP_PORT=5003
 
@@ -19,15 +21,23 @@ echo "📦 开始安装 OCI Web Panel..."
 # --- 1. 更新系统并安装依赖 ---
 echo "➡️ 步骤 1/7: 更新系统并安装依赖..."
 apt update && apt upgrade -y > /dev/null 2>&1
-apt install -y python3-venv python3-pip git curl redis-server > /dev/null 2>&1
+# 安装 redis 和 git。caddy 和 python 工具会单独检查安装。
+apt install -y redis-server git python3-venv python3-pip > /dev/null 2>&1
 
-# --- 安装 Caddy ---
-echo "➡️ 步骤 2/7: 安装 Caddy..."
-apt install -y debian-keyring debian-archive-keyring apt-transport-https > /dev/null 2>&1
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg > /dev/null 2>&1
-curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
-apt update > /dev/null 2>&1
-apt install caddy > /dev/null 2>&1
+# --- 检查并安装 Caddy ---
+echo "➡️ 步骤 2/7: 检查并安装 Caddy..."
+if ! command -v caddy &> /dev/null
+then
+    echo "Caddy 未安装，正在为您安装..."
+    apt install -y debian-keyring debian-archive-keyring apt-transport-https curl > /dev/null 2>&1
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg > /dev/null 2>&1
+    curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
+    apt update > /dev/null 2>&1
+    apt install caddy > /dev/null 2>&1
+    echo "Caddy 安装完毕。"
+else
+    echo "Caddy 已安装，跳过。"
+fi
 
 # --- 2. 克隆项目 ---
 echo "➡️ 步骤 3/7: 下载项目代码..."
@@ -105,18 +115,29 @@ read -p "请输入您的域名 (如果留空，将使用服务器IP地址): " DO
 if [ -z "$DOMAIN" ]; then
     SERVER_IP=$(curl -s ifconfig.me)
     DOMAIN=$SERVER_IP
-    echo "⚠️ 未输入域名，将使用 IP 地址: http://$SERVER_IP"
     CADDY_CONFIG="http://$DOMAIN"
 else
-    echo "✅ 已设置域名: https://$DOMAIN"
     CADDY_CONFIG="$DOMAIN"
 fi
 
-cat > $CADDY_FILE <<EOF
+# 创建独立的配置文件
+mkdir -p $CADDY_CONF_DIR
+cat > $CADDY_APP_CONF <<EOF
+# OCI Web Panel Config
 $CADDY_CONFIG {
     reverse_proxy 127.0.0.1:$APP_PORT
 }
 EOF
+
+# 检查主 Caddyfile 并安全地添加 import 语句
+IMPORT_LINE="import $CADDY_CONF_DIR/*.caddy"
+if ! grep -qF "$IMPORT_LINE" "$CADDY_MAIN_FILE"; then
+    echo "✅ 正在向主 Caddyfile 添加 import 语句..."
+    # 使用 tee 和 sudo 权限来追加内容
+    echo -e "\n$IMPORT_LINE" | sudo tee -a "$CADDY_MAIN_FILE" > /dev/null
+else
+    echo "✅ Import 语句已存在，无需添加。"
+fi
 
 systemctl reload caddy
 
