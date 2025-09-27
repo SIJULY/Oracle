@@ -1,16 +1,25 @@
-import os, json, threading, string, random, base64, time, logging, uuid, sqlite3, configparser
+import os, json, threading, string, random, base64, time, logging, uuid, sqlite3, configparser, datetime
 from flask import Flask, render_template, jsonify, request, session, g, redirect, url_for
 from functools import wraps
 import oci
-from oci.core.models import CreatePublicIpDetails, PublicIp, CreateIpv6Details
-from oci.exceptions import ServiceError, ConfigFileNotFound, InvalidPrivateKey, MissingPrivateKeyPassphrase, HttpResponseError
+from oci.core.models import CreateVcnDetails, CreateSubnetDetails, CreateInternetGatewayDetails, UpdateRouteTableDetails, RouteRule, CreatePublicIpDetails, CreateIpv6Details, UpdateInstanceDetails, UpdateInstanceShapeConfigDetails
+from oci.exceptions import ServiceError
+from celery import Celery
 
+# --- Flask App and Celery Configuration ---
 app = Flask(__name__)
 app.secret_key = 'a_very_secret_key_for_oci_panel'
-PASSWORD = "You22kme#12345" # 【重要】请修改为您自己的登录密码
+app.config.update(
+    CELERY_BROKER_URL='redis://localhost:6379/0',
+    CELERY_RESULT_BACKEND='redis://localhost:6379/0'
+)
+celery = Celery(app.import_name, backend=app.config['CELERY_RESULT_BACKEND'], broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
+
+# --- General Configuration & Helpers ---
+PASSWORD = "You22kme#12345"
 KEYS_FILE = "oci_profiles.json"
 DATABASE = 'oci_tasks.db'
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 数据库设置与辅助函数 ---
@@ -20,17 +29,31 @@ def get_db():
         db = g._database = sqlite3.connect(DATABASE, check_same_thread=False)
         db.row_factory = sqlite3.Row
     return db
+
 @app.teardown_appcontext
 def close_connection(exception):
     db = getattr(g, '_database', None)
     if db is not None: db.close()
+
 def init_db():
     if not os.path.exists(DATABASE):
         with app.app_context():
             db = get_db()
-            db.cursor().executescript("CREATE TABLE tasks (id TEXT PRIMARY KEY, status TEXT NOT NULL, result TEXT);")
+            db.cursor().executescript("CREATE TABLE tasks (id TEXT PRIMARY KEY, type TEXT, name TEXT, status TEXT NOT NULL, result TEXT, created_at TEXT);")
             db.commit()
             app.logger.info("任务数据库已初始化。")
+    else:
+        with app.app_context():
+            db = get_db()
+            cursor = db.cursor()
+            cursor.execute("PRAGMA table_info(tasks)")
+            columns = [info[1] for info in cursor.fetchall()]
+            if 'created_at' not in columns:
+                cursor.execute("ALTER TABLE tasks ADD COLUMN created_at TEXT")
+            db.commit()
+            app.logger.info("任务数据库已检查/更新。")
+
+
 def query_db(query, args=(), one=False):
     db = sqlite3.connect(DATABASE); db.row_factory = sqlite3.Row; cur = db.execute(query, args)
     rv = cur.fetchall(); cur.close(); db.close()
@@ -40,13 +63,21 @@ def query_db(query, args=(), one=False):
 def load_profiles():
     if not os.path.exists(KEYS_FILE): return {}
     try:
-        with open(KEYS_FILE, 'r', encoding='utf-8') as f: content = f.read(); return json.loads(content) if content else {}
-    except (IOError, json.JSONDecodeError): return {}
+        with open(KEYS_FILE, 'r', encoding='utf-8') as f: 
+            content = f.read()
+            if not content: return {}
+            return json.loads(content)
+    except (IOError, json.JSONDecodeError) as e:
+        app.logger.error(f"FATAL: Could not read or parse {KEYS_FILE}: {e}")
+        return {}
+
 def save_profiles(profiles):
     with open(KEYS_FILE, 'w', encoding='utf-8') as f: json.dump(profiles, f, indent=4, ensure_ascii=False)
+
 def generate_password(length=16):
     chars = string.ascii_letters + string.digits + "!@#$%^&*()_+=-`~[]{};:,.<>?"
     return ''.join(random.choice(chars) for i in range(length))
+
 def get_oci_clients(profile_config):
     try:
         oci.config.validate_config(profile_config)
@@ -63,6 +94,7 @@ def login_required(f):
             return redirect('/login')
         return f(*args, **kwargs)
     return decorated_function
+
 def oci_clients_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -87,69 +119,114 @@ def login():
         else:
             return render_template("login.html", error="密码错误")
     return render_template("login.html")
+
 @app.route("/logout")
 def logout():
     session.clear(); return redirect('/login')
+
 @app.route("/")
 @login_required
 def index():
     return render_template("index.html")
 
 # --- API 路由 ---
-@app.route("/api/profiles/import_ini", methods=["POST"])
-@login_required
-def import_profiles_from_ini():
-    file = request.files.get('file')
-    if not file: return jsonify({"error": "未提供文件"}), 400
-    try:
-        content = file.read().decode('utf-8')
-        config_parser = configparser.ConfigParser()
-        config_parser.read_string(content)
-        profiles = config_parser.sections()
-        if 'DEFAULT' in config_parser and bool(config_parser['DEFAULT']):
-            if 'DEFAULT' not in profiles: profiles.insert(0, 'DEFAULT')
-        
-        profiles_data = {name: dict(config_parser.items(name)) for name in profiles}
-        return jsonify(profiles_data)
-    except Exception as e:
-        return jsonify({"error": f"解析INI文件失败: {str(e)}"}), 500
-
 @app.route("/api/profiles", methods=["GET", "POST"])
 @login_required
 def manage_profiles():
     profiles = load_profiles()
-    if request.method == "GET": return jsonify(profiles)
+    if request.method == "GET":
+        return jsonify(list(profiles.keys()))
+    
     data = request.json
-    for alias, profile_data in data.items():
-        profiles[alias] = profile_data
+    alias = data.get("alias")
+    profile_data = data.get("profile_data")
+    if not alias or not profile_data:
+        return jsonify({"error": "别名和配置数据不能为空"}), 400
+    
+    profiles[alias] = profile_data
     save_profiles(profiles)
-    return jsonify({"success": True})
+    return jsonify({"success": True, "alias": alias})
 
-@app.route("/api/profiles/<alias>", methods=["DELETE"])
+@app.route("/api/profiles/<alias>", methods=["GET", "DELETE"])
 @login_required
-def delete_profile(alias):
+def handle_single_profile(alias):
     profiles = load_profiles()
-    if alias not in profiles: return jsonify({"error": "账号未找到"}), 404
-    del profiles[alias]
-    save_profiles(profiles)
-    if session.get('oci_profile_alias') == alias: session.pop('oci_profile_alias', None)
-    return jsonify({"success": True})
+    if alias not in profiles:
+        return jsonify({"error": "账号未找到"}), 404
+
+    if request.method == "GET":
+        return jsonify(profiles[alias])
+
+    if request.method == "DELETE":
+        del profiles[alias]
+        save_profiles(profiles)
+        if session.get('oci_profile_alias') == alias:
+            session.pop('oci_profile_alias', None)
+        return jsonify({"success": True})
+
+@app.route('/api/tasks/snatching/running', methods=['GET'])
+@login_required
+def get_running_snatching_tasks():
+    tasks = query_db("SELECT id, name, result, created_at FROM tasks WHERE type = 'snatch' AND status = 'running' ORDER BY created_at DESC")
+    return jsonify([dict(task) for task in tasks])
+
+@app.route('/api/tasks/snatching/completed', methods=['GET'])
+@login_required
+def get_completed_snatching_tasks():
+    tasks = query_db("SELECT id, name, status, result, created_at FROM tasks WHERE type = 'snatch' AND (status = 'success' OR status = 'failure') ORDER BY created_at DESC LIMIT 50")
+    return jsonify([dict(task) for task in tasks])
+
+@app.route('/api/tasks/<task_id>', methods=['DELETE'])
+@login_required
+def delete_task_record(task_id):
+    try:
+        task = query_db("SELECT status FROM tasks WHERE id = ?", [task_id], one=True)
+        if task and task['status'] in ['success', 'failure']:
+            db = get_db()
+            db.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
+            db.commit()
+            return jsonify({"success": True, "message": "任务记录已删除。"})
+        else:
+            return jsonify({"error": "只能删除已完成或失败的任务记录。"}), 400
+    except Exception as e:
+        app.logger.error(f"删除任务记录 {task_id} 失败: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/tasks/<task_id>/stop', methods=['POST'])
+@login_required
+def stop_task(task_id):
+    try:
+        celery.control.revoke(task_id, terminate=True, signal='SIGKILL')
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', '任务已被用户手动停止。', task_id))
+        return jsonify({"success": True, "message": f"停止任务 {task_id} 的请求已发送。"})
+    except Exception as e:
+        app.logger.error(f"停止任务 {task_id} 失败: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/session", methods=["POST", "GET", "DELETE"])
 @login_required
 def oci_session():
     if request.method == "POST":
         alias = request.json.get("alias")
-        if not alias or alias not in load_profiles(): return jsonify({"error": "无效的账号别名"}), 400
+        profiles = load_profiles()
+        if not alias or alias not in profiles: return jsonify({"error": "无效的账号别名"}), 400
         session['oci_profile_alias'] = alias
-        profile_config = load_profiles().get(alias)
+        profile_config = profiles.get(alias)
         _, error = get_oci_clients(profile_config)
         if error: return jsonify({"error": f"连接验证失败: {error}"}), 400
-        return jsonify({"success": True, "alias": alias})
+        
+        can_create_and_snatch = bool(profile_config.get('default_ssh_public_key'))
+        return jsonify({"success": True, "alias": alias, "can_create": can_create_and_snatch, "can_snatch": can_create_and_snatch})
+
     if request.method == "GET":
         alias = session.get('oci_profile_alias')
-        if alias: return jsonify({"logged_in": True, "alias": alias})
+        if alias:
+            profiles = load_profiles()
+            profile_config = profiles.get(alias, {})
+            can_create_and_snatch = bool(profile_config.get('default_ssh_public_key'))
+            return jsonify({"logged_in": True, "alias": alias, "can_create": can_create_and_snatch, "can_snatch": can_create_and_snatch})
         return jsonify({"logged_in": False})
+        
     if request.method == "DELETE":
         session.pop('oci_profile_alias', None); return jsonify({"success": True})
 
@@ -170,11 +247,12 @@ def get_instances():
                  "display_name": instance.display_name, "id": instance.id, "lifecycle_state": instance.lifecycle_state,
                  "region": instance.region, "shape": instance.shape, "availability_domain": instance.availability_domain,
                  "time_created": instance.time_created.isoformat() if instance.time_created else None,
-                 "ocpus": instance.shape_config.ocpus, "memory_in_gbs": instance.shape_config.memory_in_gbs,
+                 "ocpus": instance.shape_config.ocpus if instance.shape_config and hasattr(instance.shape_config, 'ocpus') else 'N/A',
+                 "memory_in_gbs": instance.shape_config.memory_in_gbs if instance.shape_config and hasattr(instance.shape_config, 'memory_in_gbs') else 'N/A',
                  "private_ip": "N/A", "public_ip": "N/A", "ipv6_address": "N/A",
                  "boot_volume_size_gb": "N/A", "vnic_id": None, "subnet_id": None
              }
-             vnic_attachments = compute_client.list_vnic_attachments(compartment_id, instance_id=instance.id).data
+             vnic_attachments = oci.pagination.list_call_get_all_results(compute_client.list_vnic_attachments, compartment_id=compartment_id, instance_id=instance.id).data
              if vnic_attachments:
                  vnic_id = vnic_attachments[0].vnic_id
                  subnet_id = vnic_attachments[0].subnet_id
@@ -186,7 +264,12 @@ def get_instances():
                  ipv6s = vnet_client.list_ipv6s(vnic_id=vnic_id).data
                  instance_data['ipv6_address'] = ipv6s[0].ip_address if ipv6s else "无"
 
-             boot_vol_attachments = compute_client.list_boot_volume_attachments(instance.availability_domain, compartment_id, instance_id=instance.id).data
+             boot_vol_attachments = oci.pagination.list_call_get_all_results(
+                 compute_client.list_boot_volume_attachments, 
+                 instance.availability_domain,
+                 compartment_id,
+                 instance_id=instance.id
+             ).data
              if boot_vol_attachments:
                  boot_vol = bs_client.get_boot_volume(boot_vol_attachments[0].boot_volume_id).data
                  instance_data['boot_volume_size_gb'] = f"{int(boot_vol.size_in_gbs)} GB"
@@ -206,106 +289,147 @@ def instance_action():
     data = request.json
     action = data.get('action')
     instance_id = data.get('instance_id')
+    instance_name = data.get('instance_name', instance_id[-12:])
+
     if not action or not instance_id: return jsonify({"error": "Action and instance_id are required"}), 400
     
     task_id = str(uuid.uuid4())
     db = get_db()
-    db.execute('INSERT INTO tasks (id, status) VALUES (?, ?)', (task_id, 'pending'))
+    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
+               (task_id, 'action', f"{action} on {instance_name}", 'pending', '', datetime.datetime.utcnow().isoformat()))
     db.commit()
 
-    task_kwargs = { 'task_id': task_id, 'profile_config': g.oci_config, 'action': action, 'instance_id': instance_id, 'data': data }
-    threading.Thread(target=_instance_action_task, kwargs=task_kwargs).start()
+    task_kwargs = { 'profile_config': g.oci_config, 'action': action, 'instance_id': instance_id, 'data': data }
+    _instance_action_task.delay(task_id, **task_kwargs)
     return jsonify({"message": f"'{action}' 请求已提交...", "task_id": task_id})
-
-def _instance_action_task(task_id, profile_config, action, instance_id, data):
-    with app.app_context():
-        db = get_db()
-        db.execute('UPDATE tasks SET status = ? WHERE id = ?', ('running', task_id)); db.commit()
-        try:
-            clients, error = get_oci_clients(profile_config)
-            if error: raise Exception(error)
-            
-            action_upper = action.upper()
-            result_message = ""
-
-            if action_upper in ["START", "STOP", "SOFTRESET"]:
-                clients['compute'].instance_action(instance_id=instance_id, action=action_upper)
-                result_message = f"实例 {action_upper} 命令已发送。"
-            elif action_upper == "TERMINATE":
-                preserve = data.get('preserve_boot_volume', False)
-                clients['compute'].terminate_instance(instance_id, preserve_boot_volume=preserve)
-                result_message = "实例终止命令已发送。"
-            elif action_upper == "CHANGE_IP":
-                vnic_id = data.get('vnic_id')
-                compartment_id = profile_config['tenancy']
-                vnet_client = clients['vnet']
-                private_ips = oci.pagination.list_call_get_all_results(vnet_client.list_private_ips, vnic_id=vnic_id).data
-                primary_private_ip = next((p for p in private_ips if p.is_primary), None)
-                if not primary_private_ip: raise Exception("未找到主私有IP")
-                
-                try:
-                    pub_ip_details = oci.core.models.GetPublicIpByPrivateIpIdDetails(private_ip_id=primary_private_ip.id)
-                    existing_pub_ip = vnet_client.get_public_ip_by_private_ip_id(pub_ip_details).data
-                    if existing_pub_ip.lifetime == "EPHEMERAL":
-                        vnet_client.delete_public_ip(existing_pub_ip.id)
-                        time.sleep(5)
-                except ServiceError as e:
-                    if e.status != 404: raise
-                
-                new_pub_ip_details = CreatePublicIpDetails(compartment_id=compartment_id, lifetime="EPHEMERAL", private_ip_id=primary_private_ip.id)
-                new_pub_ip = vnet_client.create_public_ip(new_pub_ip_details).data
-                result_message = f"更换IP请求成功，新IP: {new_pub_ip.ip_address}"
-            
-            db.execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', result_message, task_id)); db.commit()
-        except Exception as e:
-            error_message = f"操作 '{action}' 失败: {str(e)}"
-            db.execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id)); db.commit()
-
 
 @app.route('/api/create-instance', methods=['POST'])
 @login_required
 @oci_clients_required
 def create_instance():
     task_id = str(uuid.uuid4())
-    db = get_db()
-    db.execute('INSERT INTO tasks (id, status) VALUES (?, ?)', (task_id, 'pending'))
-    db.commit()
-    
     data = request.json
-    task_kwargs = { 'task_id': task_id, 'profile_config': g.oci_config, 'details': data }
-    threading.Thread(target=_create_instance_task, kwargs=task_kwargs).start()
+    db = get_db()
+    alias = session.get('oci_profile_alias')
+    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
+               (task_id, 'create', data.get('display_name_prefix', 'N/A'), 'pending', '', datetime.datetime.utcnow().isoformat()))
+    db.commit()
+    _create_instance_task.delay(task_id, g.oci_config, alias, data)
     return jsonify({"message": "创建实例请求已提交...", "task_id": task_id})
 
-def _create_instance_task(task_id, profile_config, details):
-    with app.app_context():
-        db = get_db()
-        db.execute('UPDATE tasks SET status = ? WHERE id = ?', ('running', task_id)); db.commit()
-        try:
-            clients, error = get_oci_clients(profile_config)
-            if error: raise Exception(error)
-            
-            compute_client, identity_client = clients['compute'], clients['identity']
-            tenancy_ocid = profile_config.get('tenancy')
-            ads = oci.pagination.list_call_get_all_results(identity_client.list_availability_domains, compartment_id=tenancy_ocid).data
-            if not ads: raise Exception("无法获取可用域")
-            ad_name = ads[0].name
-            
-            subnet_id = profile_config.get('default_subnet_ocid')
-            ssh_key = profile_config.get('default_ssh_public_key')
-            if not subnet_id or not ssh_key: raise Exception("账号配置缺少默认子网或SSH公钥")
+@app.route('/api/snatch-instance', methods=['POST'])
+@login_required
+@oci_clients_required
+def snatch_instance():
+    task_id = str(uuid.uuid4())
+    data = request.json
+    db = get_db()
+    alias = session.get('oci_profile_alias')
+    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
+               (task_id, 'snatch', data.get('display_name_prefix', 'N/A'), 'pending', '', datetime.datetime.utcnow().isoformat()))
+    db.commit()
+    _snatch_instance_task.delay(task_id, g.oci_config, alias, data)
+    return jsonify({"message": "抢占实例任务已提交...", "task_id": task_id})
 
-            os_name, os_version = details['os_name_version'].split('-')
-            shape = details['shape']
-            
-            images = oci.pagination.list_call_get_all_results(
-                compute_client.list_images, compartment_id=tenancy_ocid, operating_system=os_name,
-                operating_system_version=os_version, shape=shape, sort_by="TIMECREATED", sort_order="DESC"
-            ).data
-            if not images: raise Exception(f"未找到兼容的镜像 for {os_name} {os_version}")
-            image_ocid = images[0].id
+@app.route('/api/task_status/<task_id>')
+@login_required
+def task_status(task_id):
+    task = query_db('SELECT * FROM tasks WHERE id = ?', [task_id], one=True)
+    if task is None: return jsonify({'status': 'not_found'}), 404
+    return jsonify({'status': task['status'], 'result': task['result']})
 
-            root_password = generate_password()
-            user_data_encoded = base64.b64encode(f"""#cloud-config
+# --- Celery Tasks ---
+def _db_execute(query, params=()):
+    db = sqlite3.connect(DATABASE)
+    db.execute(query, params)
+    db.commit()
+    db.close()
+
+@celery.task
+def _instance_action_task(task_id, profile_config, action, instance_id, data):
+    _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '正在执行操作...', task_id))
+    try:
+        clients, error = get_oci_clients(profile_config)
+        if error: raise Exception(error)
+        
+        compute_client = clients['compute']
+        vnet_client = clients['vnet']
+        action_upper = action.upper()
+        result_message = ""
+
+        if action_upper in ["START", "STOP", "SOFTRESET"]:
+            compute_client.instance_action(instance_id=instance_id, action=action_upper)
+            result_message = f"实例 {action_upper} 命令已发送。"
+        elif action_upper == "TERMINATE":
+            preserve = data.get('preserve_boot_volume', False)
+            compute_client.terminate_instance(instance_id, preserve_boot_volume=preserve)
+            result_message = "实例终止命令已发送。"
+        elif action_upper == "CHANGEIP":
+            vnic_id = data.get('vnic_id')
+            if not vnic_id: raise Exception("缺少 VNIC ID，无法更换IP。")
+            compartment_id = profile_config['tenancy']
+            list_private_ips_response = oci.pagination.list_call_get_all_results(vnet_client.list_private_ips, vnic_id=vnic_id)
+            primary_private_ip = next((p for p in list_private_ips_response.data if p.is_primary), None)
+            if not primary_private_ip: raise Exception(f"未能在 VNIC {vnic_id} 上找到主私有 IP。")
+            
+            try:
+                get_public_ip_details = oci.core.models.GetPublicIpByPrivateIpIdDetails(private_ip_id=primary_private_ip.id)
+                existing_public_ip = vnet_client.get_public_ip_by_private_ip_id(get_public_ip_details).data
+                if existing_public_ip.lifetime == oci.core.models.PublicIp.LIFETIME_EPHEMERAL:
+                    vnet_client.delete_public_ip(existing_public_ip.id)
+                    time.sleep(5)
+            except ServiceError as e:
+                if e.status != 404: raise
+            
+            create_public_ip_details = CreatePublicIpDetails(compartment_id=compartment_id, lifetime="EPHEMERAL", private_ip_id=primary_private_ip.id)
+            new_public_ip = vnet_client.create_public_ip(create_public_ip_details).data
+            result_message = f"更换IP请求成功，新IP: {new_public_ip.ip_address}"
+        elif action_upper == "ASSIGNIPV6":
+            vnic_id = data.get('vnic_id')
+            subnet_id = data.get('subnet_id')
+            if not vnic_id or not subnet_id: raise Exception("缺少 VNIC ID 或 Subnet ID，无法分配IPv6。")
+            
+            subnet = vnet_client.get_subnet(subnet_id).data
+            if not subnet.ipv6_cidr_block: raise Exception(f"子网 {subnet.display_name} 未配置IPv6 CIDR，无法分配地址。")
+            
+            create_ipv6_details = CreateIpv6Details(vnic_id=vnic_id, ipv6_subnet_cidr=subnet.ipv6_cidr_block)
+            new_ipv6 = vnet_client.create_ipv6(create_ipv6_details).data
+            result_message = f"已成功请求IPv6地址。\n新IPv6地址: {new_ipv6.ip_address}"
+        
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', result_message, task_id))
+
+    except Exception as e:
+        error_message = f"操作 '{action_upper}' 失败: {str(e)}"
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
+
+@celery.task
+def _create_instance_task(task_id, profile_config, alias, details):
+    _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '正在创建实例...', task_id))
+    try:
+        clients, error = get_oci_clients(profile_config)
+        if error: raise Exception(error)
+        compute_client, identity_client, vnet_client = clients['compute'], clients['identity'], clients['vnet']
+        tenancy_ocid = profile_config.get('tenancy')
+        ssh_key = profile_config.get('default_ssh_public_key')
+        if not ssh_key:
+            raise Exception("账号配置缺少默认SSH公钥，无法创建实例。")
+        
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '正在检查和配置网络...', task_id))
+        subnet_id = _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid)
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', f'网络准备就绪: ...{subnet_id[-12:]}', task_id))
+
+        ads = oci.pagination.list_call_get_all_results(identity_client.list_availability_domains, compartment_id=tenancy_ocid).data
+        if not ads: raise Exception("无法获取可用域")
+        ad_name = ads[0].name
+        
+        os_name, os_version = details['os_name_version'].split('-')
+        shape = details['shape']
+        images = oci.pagination.list_call_get_all_results(compute_client.list_images, compartment_id=tenancy_ocid, operating_system=os_name, operating_system_version=os_version, shape=shape, sort_by="TIMECREATED", sort_order="DESC").data
+        if not images: raise Exception(f"未找到兼容的镜像 for {os_name} {os_version}")
+        image_ocid = images[0].id
+        
+        root_password = generate_password()
+        user_data_encoded = base64.b64encode(f"""#cloud-config
 password: {root_password}
 chpasswd: {{ expire: False }}
 ssh_pwauth: True
@@ -315,45 +439,97 @@ runcmd:
   - systemctl restart sshd || service sshd restart || service ssh restart
 """.encode('utf-8')).decode('utf-8')
 
-            base_name = details.get('display_name_prefix', 'Instance')
-            instance_count = details.get('instance_count', 1)
-            created_instances_info = []
+        base_name = details.get('display_name_prefix', 'Instance')
+        instance_count = details.get('instance_count', 1)
+        created_instances_info = []
 
-            for i in range(instance_count):
-                instance_name = f"{base_name}-{i+1}" if instance_count > 1 else base_name
-                launch_details = oci.core.models.LaunchInstanceDetails(
-                    compartment_id=tenancy_ocid, availability_domain=ad_name, shape=shape,
-                    display_name=instance_name,
-                    create_vnic_details=oci.core.models.CreateVnicDetails(subnet_id=subnet_id, assign_public_ip=True),
-                    metadata={"ssh_authorized_keys": ssh_key, "user_data": user_data_encoded},
-                    source_details=oci.core.models.InstanceSourceViaImageDetails(
-                        image_id=image_ocid,
-                        boot_volume_size_in_gbs=details['boot_volume_size']
-                    ),
-                    shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
-                        ocpus=details.get('ocpus'), memory_in_gbs=details.get('memory_in_gbs')
-                    ) if shape == "VM.Standard.A1.Flex" else None
-                )
+        for i in range(instance_count):
+            instance_name = f"{base_name}-{i+1}" if instance_count > 1 else base_name
+            launch_details = oci.core.models.LaunchInstanceDetails(
+                compartment_id=tenancy_ocid, availability_domain=ad_name, shape=shape, display_name=instance_name,
+                create_vnic_details=oci.core.models.CreateVnicDetails(subnet_id=subnet_id, assign_public_ip=True),
+                metadata={"ssh_authorized_keys": ssh_key, "user_data": user_data_encoded},
+                source_details=oci.core.models.InstanceSourceViaImageDetails(image_id=image_ocid, boot_volume_size_in_gbs=details['boot_volume_size']),
+                shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=details.get('ocpus'), memory_in_gbs=details.get('memory_in_gbs')) if "Flex" in shape else None)
+            instance = compute_client.launch_instance(launch_details).data
+            created_instances_info.append(instance_name)
+            if i < instance_count - 1: time.sleep(3)
+        
+        success_message = f"🎉 {len(created_instances_info)}个实例创建成功!\n    - 实例名: {', '.join(created_instances_info)}\n    - Root 密码: {root_password} (所有实例通用)"
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', success_message, task_id))
+    except Exception as e:
+        error_message = f"❌ 实例创建失败! \n    - 原因: {str(e)}"
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
+
+@celery.task
+def _snatch_instance_task(task_id, profile_config, alias, details):
+    _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '抢占任务开始...', task_id))
+    try:
+        clients, error = get_oci_clients(profile_config)
+        if error: raise Exception(error)
+        compute_client, identity_client, vnet_client = clients['compute'], clients['identity'], clients['vnet']
+        tenancy_ocid = profile_config.get('tenancy')
+        ssh_key = profile_config.get('default_ssh_public_key')
+        if not ssh_key:
+            raise Exception("账号配置缺少默认SSH公钥，无法开始抢占任务。")
+        
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '正在检查和配置网络...', task_id))
+        subnet_id = _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid)
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', f'网络准备就绪: ...{subnet_id[-12:]}', task_id))
+
+        ads = identity_client.list_availability_domains(compartment_id=tenancy_ocid).data
+        ad_name = details.get('availabilityDomain') or ads[0].name
+        
+        os_name, os_version = details['os_name_version'].split('-')
+        shape = details['shape']
+        images = oci.pagination.list_call_get_all_results(compute_client.list_images, compartment_id=tenancy_ocid, operating_system=os_name, operating_system_version=os_version, shape=shape, sort_by="TIMECREATED", sort_order="DESC").data
+        if not images: raise Exception(f"未找到兼容的镜像 for {os_name} {os_version}")
+        image_ocid = images[0].id
+        
+        root_password = generate_password()
+        user_data_encoded = base64.b64encode(f"""#cloud-config
+password: {root_password}
+chpasswd: {{ expire: False }}
+ssh_pwauth: True
+runcmd:
+  - sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart sshd || service sshd restart || service ssh restart
+""".encode('utf-8')).decode('utf-8')
+
+        launch_details = oci.core.models.LaunchInstanceDetails(
+            compartment_id=tenancy_ocid, availability_domain=ad_name, shape=shape,
+            display_name=details.get('display_name_prefix', 'snatch-instance'),
+            create_vnic_details=oci.core.models.CreateVnicDetails(subnet_id=subnet_id, assign_public_ip=True),
+            metadata={"ssh_authorized_keys": ssh_key, "user_data": user_data_encoded},
+            source_details=oci.core.models.InstanceSourceViaImageDetails(image_id=image_ocid, boot_volume_size_in_gbs=details['boot_volume_size']),
+            shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=details.get('ocpus'), memory_in_gbs=details.get('memory_in_gbs')) if "Flex" in shape else None)
+        
+        retry_count = 0
+        min_delay = details.get('min_delay', 30)
+        max_delay = details.get('max_delay', 90)
+        while True:
+            retry_count += 1
+            try:
+                _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', f"第 {retry_count} 次尝试创建实例...", task_id))
                 instance = compute_client.launch_instance(launch_details).data
-                created_instances_info.append(instance_name)
-                if i < instance_count - 1: time.sleep(3)
+                success_message = f"🎉 抢占成功 (第 {retry_count} 次尝试)!\n    - 实例名: {instance.display_name}\n    - Root 密码: {root_password}"
+                _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', success_message, task_id))
+                break
+            except ServiceError as e:
+                if e.status == 500 and ("OutOfCapacity" in e.code or "Out of host capacity" in e.message):
+                    delay = random.randint(min_delay, max_delay)
+                    status_msg = f"第 {retry_count} 次尝试失败：资源不足。将在 {delay} 秒后重试..."
+                    _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
+                    time.sleep(delay)
+                    continue
+                else:
+                    raise e
+    except Exception as e:
+        error_message = f"❌ 抢占任务失败! \n    - 原因: {str(e)}"
+        _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
 
-            success_message = f"🎉 {len(created_instances_info)}个实例创建请求已发送!\n    - 实例名: {', '.join(created_instances_info)}\n    - Root 密码: {root_password} (所有实例通用)"
-            db.execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', success_message, task_id))
-            db.commit()
-        except Exception as e:
-            error_message = f"❌ 实例创建失败! \n    - 原因: {str(e)}"
-            db.execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
-            db.commit()
-
-@app.route('/api/task_status/<task_id>')
-@login_required
-def task_status(task_id):
-    task = query_db('SELECT * FROM tasks WHERE id = ?', [task_id], one=True)
-    if task is None: return jsonify({'status': 'not_found'}), 404
-    return jsonify({'status': task['status'], 'result': task['result']})
-
+# --- Main Execution ---
 init_db()
-
 if __name__ == '__main__':
     app.run(debug=True, port=5003)
