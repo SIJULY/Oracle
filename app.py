@@ -8,6 +8,12 @@ from celery import Celery
 
 # --- Flask App and Celery Configuration ---
 app = Flask(__name__)
+
+# --- ↓↓↓ 本次唯一的修改点：添加下面的配置来禁用缓存 ↓↓↓ ---
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+# --- ↑↑↑ 本次唯一的修改点：添加上面的配置来禁用缓存 ↑↑↑ ---
+
 app.secret_key = 'a_very_secret_key_for_oci_panel'
 app.config.update(
     CELERY_BROKER_URL='redis://localhost:6379/0',
@@ -17,7 +23,7 @@ celery = Celery(app.import_name, backend=app.config['CELERY_RESULT_BACKEND'], br
 celery.conf.update(app.config)
 
 # --- General Configuration & Helpers ---
-PASSWORD = "asdsaSq$"
+PASSWORD = "You22kme#12345"
 KEYS_FILE = "oci_profiles.json"
 DATABASE = 'oci_tasks.db'
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -82,15 +88,11 @@ def get_oci_clients(profile_config):
     try:
         # The key_content needs to be written to a temporary file for the SDK to read
         if 'key_content' in profile_config and 'key_file' not in profile_config:
-            # Create a temporary file to hold the key
-            # This is a simplified approach; for production, consider a more secure temp file handling
             key_file_path = f"/tmp/{uuid.uuid4()}.pem"
             with open(key_file_path, 'w') as key_file:
                 key_file.write(profile_config['key_content'])
-            # Ensure proper permissions are set for the key file
             os.chmod(key_file_path, 0o600)
             
-            # Update a copy of the config to use this temp file
             config_for_sdk = profile_config.copy()
             config_for_sdk['key_file'] = key_file_path
         else:
@@ -104,7 +106,6 @@ def get_oci_clients(profile_config):
             "bs": oci.core.BlockstorageClient(config_for_sdk) 
         }
 
-        # Clean up the temporary file if it was created
         if 'key_content' in profile_config and 'key_file' not in profile_config:
             if os.path.exists(key_file_path):
                 os.remove(key_file_path)
@@ -114,19 +115,12 @@ def get_oci_clients(profile_config):
         return None, f"创建OCI客户端失败: {str(e)}"
 
 def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
-    """
-    确保给定的配置文件有可用的公共子网。
-    首先检查配置文件。如果未找到或无效，则创建一个新的VCN、
-    互联网网关和子网，然后将新的子网OCID保存到配置文件中。
-    """
     profiles = load_profiles()
     profile_config = profiles.get(alias, {})
     subnet_id = profile_config.get('default_subnet_ocid')
 
-    # 1. 检查配置文件中是否已存在有效的子网OCID
     if subnet_id:
         try:
-            # 验证子网在OCI中是否仍然存在
             get_subnet_response = vnet_client.get_subnet(subnet_id)
             if get_subnet_response.data.lifecycle_state == 'AVAILABLE':
                 logging.info(f"使用账号 '{alias}' 中已配置的子网: ...{subnet_id[-12:]}")
@@ -135,12 +129,10 @@ def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
             if e.status == 404:
                 logging.warning(f"配置文件中的子网 {subnet_id} 已不存在，将重新创建网络。")
             else:
-                raise e # 重新引发其他意外错误
+                raise e
 
-    # 2. 如果未找到有效子网，则创建所有必要的网络资源
     logging.info(f"账号 '{alias}' 未配置可用子网，开始自动创建网络资源...")
     
-    # 创建VCN
     vcn_name = f"vcn-autocreated-{alias}-{random.randint(100, 999)}"
     vcn_details = CreateVcnDetails(
         cidr_block="10.0.0.0/16",
@@ -148,11 +140,9 @@ def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
         compartment_id=tenancy_ocid
     )
     vcn = vnet_client.create_vcn(vcn_details).data
-    # 等待VCN变为可用状态
     oci.waiter.wait_for_resource(vnet_client, vnet_client.get_vcn(vcn.id), 'lifecycle_state', oci.core.models.Vcn.LIFECYCLE_STATE_AVAILABLE)
     logging.info(f"VCN '{vcn_name}' ({vcn.id}) 已创建。")
 
-    # 创建互联网网关
     ig_name = f"ig-autocreated-{alias}-{random.randint(100, 999)}"
     ig_details = CreateInternetGatewayDetails(
         display_name=ig_name,
@@ -161,11 +151,9 @@ def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
         vcn_id=vcn.id
     )
     ig = vnet_client.create_internet_gateway(ig_details).data
-    # 等待互联网网关变为可用状态
     oci.waiter.wait_for_resource(vnet_client, vnet_client.get_internet_gateway(ig.id), 'lifecycle_state', oci.core.models.InternetGateway.LIFECYCLE_STATE_AVAILABLE)
     logging.info(f"Internet Gateway '{ig_name}' ({ig.id}) 已创建。")
 
-    # 更新默认路由表以允许互联网访问
     route_table_id = vcn.default_route_table_id
     route_rule = RouteRule(destination="0.0.0.0/0", network_entity_id=ig.id)
     get_rt_response = vnet_client.get_route_table(route_table_id)
@@ -175,7 +163,6 @@ def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
     vnet_client.update_route_table(route_table_id, update_rt_details)
     logging.info(f"已更新路由表以允许公网访问。")
 
-    # 创建子网
     subnet_name = f"subnet-autocreated-{alias}-{random.randint(100, 999)}"
     subnet_details = CreateSubnetDetails(
         compartment_id=tenancy_ocid,
@@ -184,11 +171,9 @@ def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
         display_name=subnet_name
     )
     subnet = vnet_client.create_subnet(subnet_details).data
-    # 等待子网变为可用状态
     oci.waiter.wait_for_resource(vnet_client, vnet_client.get_subnet(subnet.id), 'lifecycle_state', oci.core.models.Subnet.LIFECYCLE_STATE_AVAILABLE)
     logging.info(f"子网 '{subnet_name}' ({subnet.id}) 已创建。")
 
-    # 3. 将新的子网OCID保存回配置文件
     profiles[alias]['default_subnet_ocid'] = subnet.id
     save_profiles(profiles)
     logging.info(f"已将新创建的子网ID保存到账号 '{alias}' 的配置中。")
@@ -487,7 +472,7 @@ def _instance_action_task(task_id, profile_config, action, instance_id, data):
             try:
                 get_public_ip_details = oci.core.models.GetPublicIpByPrivateIpIdDetails(private_ip_id=primary_private_ip.id)
                 existing_public_ip = vnet_client.get_public_ip_by_private_ip_id(get_public_ip_details).data
-                if existing_public_ip.lifetime == oci.core.models.PublicIp.LIFECYCLE_EPHEMERAL:
+                if existing_public_ip.lifetime == oci.core.models.PublicIp.LIFETIME_EPHEMERAL:
                     vnet_client.delete_public_ip(existing_public_ip.id)
                     time.sleep(5)
             except ServiceError as e:
@@ -572,24 +557,18 @@ runcmd:
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('success', success_message, task_id))
         return success_message
     except ServiceError as e:
-        # 专门捕获 OCI API 错误
         if e.status == 500 and "Out of host capacity" in e.message:
-            error_message = f"❌ 实例创建失败! \n    - 原因: 资源不足，请稍后再试。"
+            error_message = f"❌ 实例创建失败! \n    - 原因: 容量不足，请稍后再试。"
         else:
-            # 其他 OCI API 错误
             error_message = f"❌ 实例创建失败! \n    - OCI API 错误: {str(e)}"
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
         return error_message
     except Exception as e:
-        # 捕获所有其他非 OCI API 的异常
         error_message = f"❌ 实例创建失败! \n    - 原因: {str(e)}"
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
         return error_message
 
 
-# ==============================================================================
-# vvvvvvvvvvvvvvvv   这是修改过的函数 vvvvvvvvvvvvvvvv
-# ==============================================================================
 @celery.task
 def _snatch_instance_task(task_id, profile_config, alias, details):
     _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '抢占任务开始...', task_id))
@@ -635,7 +614,6 @@ runcmd:
             shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=details.get('ocpus'), memory_in_gbs=details.get('memory_in_gbs')) if "Flex" in shape else None)
         
     except Exception as e:
-        # 如果在准备阶段就失败，则直接报告错误并终止任务
         error_message = f"❌ 抢占任务准备阶段失败! \n    - 原因: {str(e)}"
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
         return error_message
@@ -648,7 +626,6 @@ runcmd:
         retry_count += 1
         delay = random.randint(min_delay, max_delay)
 
-        # 检查任务是否已被外部命令停止
         task_record = query_db('SELECT status FROM tasks WHERE id = ?', [task_id], one=True)
         if task_record is None or task_record['status'] == 'failure':
             logging.info(f"任务 {task_id} 已被外部停止，退出抢占循环。")
@@ -667,27 +644,19 @@ runcmd:
                 status_msg = f"第 {retry_count} 次尝试失败：资源不足。将在 {delay} 秒后重试..."
                 _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
                 time.sleep(delay)
-                # 继续下一次循环
                 continue
             else:
-                # 其他可重试的OCI API错误
                 status_msg = f"第 {retry_count} 次尝试失败：API错误 ({e.code})。将在 {delay} 秒后重试..."
                 _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
                 time.sleep(delay)
                 continue
         except Exception as e:
-            # 其他未知错误（如网络问题），也进行重试
             status_msg = f"第 {retry_count} 次尝试失败：发生未知错误。将在 {delay} 秒后重试..."
             _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
             time.sleep(delay)
             continue
-# ==============================================================================
-# ^^^^^^^^^^^^^^^^   这是修改过的函数   ^^^^^^^^^^^^^^^^
-# ==============================================================================
-
 
 # --- Main Execution ---
 init_db()
 if __name__ == '__main__':
-    # 注意：在生产环境中应使用更强大的Web服务器，如Gunicorn或uWSGI
     app.run(host='0.0.0.0', port=5003, debug=False)
