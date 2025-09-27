@@ -61,10 +61,10 @@ wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x
      * `tenancy` OCID
      * `region`
      * `.pem` 私钥文件
-   * 具体如何获取上述信息可按照下面大佬教程链接操作：
+   * 具体如何获取上述信息可按照下面大佬教程操作：
 
 ```
-https://github.com/lemoex/oci-help
+        https://github.com/lemoex/oci-help
 ```
 
 
