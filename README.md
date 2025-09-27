@@ -61,13 +61,13 @@ wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x
      * `tenancy` OCID
      * `region`
      * `.pem` 私钥文件
-   * 确保该用户所属的用户组拥有足够的权限策略，例如：
+   * 具体如何获取上述信息可按照下面大佬教程链接操作：
 
 ```hcl
-allow group <您的用户组名> to manage all-resources in tenancy
+[allow group <您的用户组名> to manage all-resources in tenancy](https://github.com/lemoex/oci-help)
 ```
 
-* 如果您想精细化控制，至少需要 `manage instance-family` 和 `manage virtual-network-family` 权限。
+
 
 ---
 
