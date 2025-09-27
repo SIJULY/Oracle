@@ -63,8 +63,8 @@ wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x
      * `.pem` 私钥文件
    * 具体如何获取上述信息可按照下面大佬教程链接操作：
 
-```hcl
-[allow group <您的用户组名> to manage all-resources in tenancy](https://github.com/lemoex/oci-help)
+```
+https://github.com/lemoex/oci-help
 ```
 
 
