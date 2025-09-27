@@ -9,10 +9,9 @@ from celery import Celery
 # --- Flask App and Celery Configuration ---
 app = Flask(__name__)
 
-# --- ↓↓↓ 本次唯一的修改点：添加下面的配置来禁用缓存 ↓↓↓ ---
+# --- 禁用缓存配置 ---
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 app.config['TEMPLATES_AUTO_RELOAD'] = True
-# --- ↑↑↑ 本次唯一的修改点：添加上面的配置来禁用缓存 ↑↑↑ ---
 
 app.secret_key = 'a_very_secret_key_for_oci_panel'
 app.config.update(
@@ -86,7 +85,6 @@ def generate_password(length=16):
 
 def get_oci_clients(profile_config):
     try:
-        # The key_content needs to be written to a temporary file for the SDK to read
         if 'key_content' in profile_config and 'key_file' not in profile_config:
             key_file_path = f"/tmp/{uuid.uuid4()}.pem"
             with open(key_file_path, 'w') as key_file:
@@ -224,7 +222,8 @@ def logout():
 def index():
     return render_template("index.html")
 
-# --- API 路由 ---
+# --- API 路由 (省略未修改部分) ---
+# ...
 @app.route("/api/profiles", methods=["GET", "POST"])
 @login_required
 def manage_profiles():
@@ -434,7 +433,7 @@ def task_status(task_id):
     task = query_db('SELECT * FROM tasks WHERE id = ?', [task_id], one=True)
     if task is None: return jsonify({'status': 'not_found'}), 404
     return jsonify({'status': task['status'], 'result': task['result']})
-
+# ...
 # --- Celery Tasks ---
 def _db_execute(query, params=()):
     db = sqlite3.connect(DATABASE)
@@ -500,6 +499,20 @@ def _instance_action_task(task_id, profile_config, action, instance_id, data):
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
         return error_message
 
+# --- ↓↓↓ 本次唯一的修改点：更新 user_data 脚本 ↓↓↓ ---
+def get_user_data(root_password):
+    user_data_script = f"""#cloud-config
+chpasswd:
+  list: |
+    root:{root_password}
+  expire: False
+runcmd:
+  - sed -i 's/^#?PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config
+  - sed -i 's/^#?PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+  - systemctl restart sshd || service sshd restart || service ssh restart
+"""
+    return base64.b64encode(user_data_script.encode('utf-8')).decode('utf-8')
+
 @celery.task
 def _create_instance_task(task_id, profile_config, alias, details):
     _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', '正在创建实例...', task_id))
@@ -527,15 +540,7 @@ def _create_instance_task(task_id, profile_config, alias, details):
         image_ocid = images[0].id
         
         root_password = generate_password()
-        user_data_encoded = base64.b64encode(f"""#cloud-config
-password: {root_password}
-chpasswd: {{ expire: False }}
-ssh_pwauth: True
-runcmd:
-  - sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart sshd || service sshd restart || service ssh restart
-""".encode('utf-8')).decode('utf-8')
+        user_data_encoded = get_user_data(root_password)
 
         base_name = details.get('display_name_prefix', 'Instance')
         instance_count = details.get('instance_count', 1)
@@ -595,15 +600,7 @@ def _snatch_instance_task(task_id, profile_config, alias, details):
         image_ocid = images[0].id
         
         root_password = generate_password()
-        user_data_encoded = base64.b64encode(f"""#cloud-config
-password: {root_password}
-chpasswd: {{ expire: False }}
-ssh_pwauth: True
-runcmd:
-  - sed -i 's/^PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
-  - sed -i 's/^#?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-  - systemctl restart sshd || service sshd restart || service ssh restart
-""".encode('utf-8')).decode('utf-8')
+        user_data_encoded = get_user_data(root_password)
 
         launch_details = oci.core.models.LaunchInstanceDetails(
             compartment_id=tenancy_ocid, availability_domain=ad_name, shape=shape,
@@ -655,6 +652,7 @@ runcmd:
             _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
             time.sleep(delay)
             continue
+# --- ↑↑↑ 本次唯一的修改点：更新 user_data 脚本 ↑↑↑ ---
 
 # --- Main Execution ---
 init_db()
