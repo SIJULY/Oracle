@@ -34,7 +34,14 @@ wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x
 
 ---
 
-<img width="1671" height="1688" alt="f987481b-9d8f-466a-a746-68e4853d8a2b" src="https://github.com/user-attachments/assets/3a974d92-ec65-417e-b432-ae97eae5735c" />
+<img width="1443" height="1434" alt="f1c590dd-1097-4cf8-b175-79ec599c8ac2" src="https://github.com/user-attachments/assets/64a1455b-22a9-484a-8f32-947383cbfaa7" />
+
+<img width="1816" height="1478" alt="34bb473d-c4d8-40c2-94e8-96824a70fd68" src="https://github.com/user-attachments/assets/8d604b44-8d73-4ec6-b85d-422b934ada92" />
+
+<img width="1529" height="1406" alt="92eb4491-1291-402b-8a31-ee36b85647f5" src="https://github.com/user-attachments/assets/d00ba123-7c31-4b5f-80d2-ddb7a1215a00" />
+
+
+
 
 
 ## 🚀 部署教程
