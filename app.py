@@ -40,11 +40,13 @@ def close_connection(exception):
     db = getattr(g, '_database', None)
     if db is not None: db.close()
 
+# --- ↓↓↓ 第 1 处修改：更新数据库结构 ↓↓↓ ---
 def init_db():
     if not os.path.exists(DATABASE):
         with app.app_context():
             db = get_db()
-            db.cursor().executescript("CREATE TABLE tasks (id TEXT PRIMARY KEY, type TEXT, name TEXT, status TEXT NOT NULL, result TEXT, created_at TEXT);")
+            # 在创建表时直接添加 account_alias 字段
+            db.cursor().executescript("CREATE TABLE tasks (id TEXT PRIMARY KEY, type TEXT, name TEXT, status TEXT NOT NULL, result TEXT, created_at TEXT, account_alias TEXT);")
             db.commit()
             app.logger.info("任务数据库已初始化。")
     else:
@@ -53,18 +55,21 @@ def init_db():
             cursor = db.cursor()
             cursor.execute("PRAGMA table_info(tasks)")
             columns = [info[1] for info in cursor.fetchall()]
+            # 兼容旧数据库，如果不存在 created_at 或 account_alias 字段则添加
             if 'created_at' not in columns:
                 cursor.execute("ALTER TABLE tasks ADD COLUMN created_at TEXT")
+            if 'account_alias' not in columns:
+                cursor.execute("ALTER TABLE tasks ADD COLUMN account_alias TEXT DEFAULT 'N/A'") # 给旧数据一个默认值
             db.commit()
             app.logger.info("任务数据库已检查/更新。")
-
+# --- ↑↑↑ 第 1 处修改结束 ↑↑↑ ---
 
 def query_db(query, args=(), one=False):
     db = sqlite3.connect(DATABASE); db.row_factory = sqlite3.Row; cur = db.execute(query, args)
     rv = cur.fetchall(); cur.close(); db.close()
     return (rv[0] if rv else None) if one else rv
 
-# --- 核心辅助函数 ---
+# --- 核心辅助函数 (无修改) ---
 def load_profiles():
     if not os.path.exists(KEYS_FILE): return {}
     try:
@@ -178,7 +183,7 @@ def _ensure_subnet_in_profile(alias, vnet_client, tenancy_ocid):
 
     return subnet.id
 
-# --- 装饰器 ---
+# --- 装饰器 (无修改) ---
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -202,7 +207,7 @@ def oci_clients_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# --- 页面路由 ---
+# --- 页面路由 (无修改) ---
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
@@ -222,8 +227,7 @@ def logout():
 def index():
     return render_template("index.html")
 
-# --- API 路由 (省略未修改部分) ---
-# ...
+# --- API 路由 (部分修改) ---
 @app.route("/api/profiles", methods=["GET", "POST"])
 @login_required
 def manage_profiles():
@@ -258,17 +262,21 @@ def handle_single_profile(alias):
             session.pop('oci_profile_alias', None)
         return jsonify({"success": True})
 
+# --- ↓↓↓ 第 2 处修改：查询并返回 account_alias ↓↓↓ ---
 @app.route('/api/tasks/snatching/running', methods=['GET'])
 @login_required
 def get_running_snatching_tasks():
-    tasks = query_db("SELECT id, name, result, created_at FROM tasks WHERE type = 'snatch' AND status = 'running' ORDER BY created_at DESC")
+    # 在 SELECT 语句中加入 account_alias
+    tasks = query_db("SELECT id, name, result, created_at, account_alias FROM tasks WHERE type = 'snatch' AND status = 'running' ORDER BY created_at DESC")
     return jsonify([dict(task) for task in tasks])
 
 @app.route('/api/tasks/snatching/completed', methods=['GET'])
 @login_required
 def get_completed_snatching_tasks():
-    tasks = query_db("SELECT id, name, status, result, created_at FROM tasks WHERE type = 'snatch' AND (status = 'success' OR status = 'failure') ORDER BY created_at DESC LIMIT 50")
+    # 在 SELECT 语句中加入 account_alias
+    tasks = query_db("SELECT id, name, status, result, created_at, account_alias FROM tasks WHERE type = 'snatch' AND (status = 'success' OR status = 'failure') ORDER BY created_at DESC LIMIT 50")
     return jsonify([dict(task) for task in tasks])
+# --- ↑↑↑ 第 2 处修改结束 ↑↑↑ ---
 
 @app.route('/api/tasks/<task_id>', methods=['DELETE'])
 @login_required
@@ -378,6 +386,8 @@ def get_instances():
     except Exception as e:
         return jsonify({"error": f"获取实例列表时发生未知错误: {str(e)}"}), 500
 
+
+# --- ↓↓↓ 第 3 处修改：插入任务时保存 account_alias ↓↓↓ ---
 @app.route('/api/instance-action', methods=['POST'])
 @login_required
 @oci_clients_required
@@ -391,8 +401,9 @@ def instance_action():
     
     task_id = str(uuid.uuid4())
     db = get_db()
-    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
-               (task_id, 'action', f"{action} on {instance_name}", 'pending', '', datetime.datetime.utcnow().isoformat()))
+    alias = session.get('oci_profile_alias', 'N/A')
+    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at, account_alias) VALUES (?, ?, ?, ?, ?, ?, ?)', 
+               (task_id, 'action', f"{action} on {instance_name}", 'pending', '', datetime.datetime.utcnow().isoformat(), alias))
     db.commit()
 
     task_kwargs = { 'profile_config': g.oci_config, 'action': action, 'instance_id': instance_id, 'data': data }
@@ -406,9 +417,9 @@ def create_instance():
     task_id = str(uuid.uuid4())
     data = request.json
     db = get_db()
-    alias = session.get('oci_profile_alias')
-    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
-               (task_id, 'create', data.get('display_name_prefix', 'N/A'), 'pending', '', datetime.datetime.utcnow().isoformat()))
+    alias = session.get('oci_profile_alias', 'N/A')
+    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at, account_alias) VALUES (?, ?, ?, ?, ?, ?, ?)', 
+               (task_id, 'create', data.get('display_name_prefix', 'N/A'), 'pending', '', datetime.datetime.utcnow().isoformat(), alias))
     db.commit()
     _create_instance_task.delay(task_id, g.oci_config, alias, data)
     return jsonify({"message": "创建实例请求已提交...", "task_id": task_id})
@@ -420,12 +431,13 @@ def snatch_instance():
     task_id = str(uuid.uuid4())
     data = request.json
     db = get_db()
-    alias = session.get('oci_profile_alias')
-    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at) VALUES (?, ?, ?, ?, ?, ?)', 
-               (task_id, 'snatch', data.get('display_name_prefix', 'N/A'), 'pending', '', datetime.datetime.utcnow().isoformat()))
+    alias = session.get('oci_profile_alias', 'N/A')
+    db.execute('INSERT INTO tasks (id, type, name, status, result, created_at, account_alias) VALUES (?, ?, ?, ?, ?, ?, ?)', 
+               (task_id, 'snatch', data.get('display_name_prefix', 'N/A'), 'pending', '', datetime.datetime.utcnow().isoformat(), alias))
     db.commit()
     _snatch_instance_task.delay(task_id, g.oci_config, alias, data)
     return jsonify({"message": "抢占实例任务已提交...", "task_id": task_id})
+# --- ↑↑↑ 第 3 处修改结束 ↑↑↑ ---
 
 @app.route('/api/task_status/<task_id>')
 @login_required
@@ -433,8 +445,8 @@ def task_status(task_id):
     task = query_db('SELECT * FROM tasks WHERE id = ?', [task_id], one=True)
     if task is None: return jsonify({'status': 'not_found'}), 404
     return jsonify({'status': task['status'], 'result': task['result']})
-# ...
-# --- Celery Tasks ---
+
+# --- Celery Tasks (无修改) ---
 def _db_execute(query, params=()):
     db = sqlite3.connect(DATABASE)
     db.execute(query, params)
@@ -499,7 +511,6 @@ def _instance_action_task(task_id, profile_config, action, instance_id, data):
         _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('failure', error_message, task_id))
         return error_message
 
-# --- ↓↓↓ 本次唯一的修改点：更新 user_data 脚本 ↓↓↓ ---
 def get_user_data(root_password):
     user_data_script = f"""#cloud-config
 chpasswd:
@@ -652,7 +663,6 @@ def _snatch_instance_task(task_id, profile_config, alias, details):
             _db_execute('UPDATE tasks SET status = ?, result = ? WHERE id = ?', ('running', status_msg, task_id))
             time.sleep(delay)
             continue
-# --- ↑↑↑ 本次唯一的修改点：更新 user_data 脚本 ↑↑↑ ---
 
 # --- Main Execution ---
 init_db()
