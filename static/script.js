@@ -79,7 +79,6 @@ document.addEventListener('DOMContentLoaded', function() {
             } else {
                 profileNames.forEach(name => {
                     const tr = document.createElement('tr');
-                    // --- ↓↓↓ 本次唯一的修改点在这里：改回 text-end ↓↓↓ ---
                     tr.innerHTML = `
                         <td>${name}</td>
                         <td class="text-end action-buttons">
@@ -88,7 +87,6 @@ document.addEventListener('DOMContentLoaded', function() {
                             <button class="btn btn-danger btn-sm delete-btn profile-action-btn" data-alias="${name}"><i class="bi bi-trash"></i> 删除</button>
                         </td>
                     `;
-                    // --- ↑↑↑ 本次唯一的修改点在这里 ↑↑↑ ---
                     profileList.appendChild(tr);
                 });
             }
@@ -411,7 +409,15 @@ document.addEventListener('DOMContentLoaded', function() {
                     const li = document.createElement('li');
                     li.className = 'list-group-item list-group-item-action';
                     li.dataset.taskId = task.id;
-                    li.innerHTML = `<strong>${task.name}</strong><br><small class="text-muted">${task.result}</small>`;
+                    // 添加显示账号的徽章
+                    li.innerHTML = `
+                        <strong>
+                            <span class="badge bg-primary me-2">${task.account_alias || '未知账号'}</span>
+                            ${task.name}
+                        </strong>
+                        <br>
+                        <small class="text-muted">${task.result}</small>
+                    `;
                     runningSnatchTasksList.appendChild(li);
                 });
             }
@@ -427,9 +433,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     let statusBadge = task.status === 'success' ? '<span class="badge bg-success">成功</span>' : '<span class="badge bg-danger">失败</span>';
                     
+                    // 添加显示账号的徽章
                     li.innerHTML = `
                         <div>
-                            <strong>${task.name}</strong>
+                            <strong>
+                                <span class="badge bg-secondary me-2">${task.account_alias || '未知账号'}</span>
+                                ${task.name}
+                            </strong>
                             <br>
                             <small class="text-muted">完成于: ${new Date(task.created_at).toLocaleString()}</small>
                         </div>
@@ -508,8 +518,10 @@ document.addEventListener('DOMContentLoaded', function() {
     // --- 任务状态轮询 ---
     function pollTaskStatus(taskId) {
         addLog(`正在监控任务 ${taskId}...`);
-        const maxRetries = 300;
+        const maxRetries = 300; // 轮询大约 25 分钟
         let retries = 0;
+        let lastLoggedStatus = ''; // <--- 用于记录此任务专属的最后一条日志状态
+    
         const intervalId = setInterval(async () => {
             if (retries >= maxRetries) {
                 clearInterval(intervalId);
@@ -527,14 +539,20 @@ document.addEventListener('DOMContentLoaded', function() {
                         setTimeout(refreshInstances, 2000);
                     }
                 } else if (result.status === 'running') {
-                    const lastLog = logOutput.lastChild ? logOutput.lastChild.textContent : "";
-                    if (result.result && !lastLog.includes(result.result)) {
+                    // 仅当从API获取的状态与我们自己记录的“最后状态”不同时，才打印日志
+                    if (result.result && result.result !== lastLoggedStatus) {
                          addLog(result.result, 'info');
+                         lastLoggedStatus = result.result; // 更新我们自己的记录
                     }
                 }
             } catch (error) {
                 clearInterval(intervalId);
-                addLog(`查询任务 ${taskId} 状态时出错。`, 'error');
+                // 如果任务找不到了（可能已被删除），就静默停止轮询
+                if (error.message.includes("404")) {
+                     console.log(`停止监控任务 ${taskId}，因为它已不存在。`);
+                } else {
+                    addLog(`查询任务 ${taskId} 状态时出错。`, 'error');
+                }
             }
             retries++;
         }, 5000);
