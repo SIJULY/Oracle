@@ -61,10 +61,10 @@ wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x
      * `tenancy` OCID
      * `region`
      * `.pem` 私钥文件
-    
-    **具体如何获取上述信息可按照下面教程操作**：
-   
 
+    
+3. **具体如何获取上述信息可按照下面教程操作**：
+   
 <img width="1600" height="1000" alt="image" src="https://github.com/user-attachments/assets/e482977d-b220-4c26-9f1e-5b8d2c84a06f" />
 
 <img width="1600" height="1000" alt="image" src="https://github.com/user-attachments/assets/517f4bad-5382-452b-8e4c-886877c22aac" />
