@@ -63,9 +63,17 @@ wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x
      * `.pem` 私钥文件
    * 具体如何获取上述信息可按照下面大佬教程操作：
 
-```
-        https://github.com/lemoex/oci-help
-```
+<img width="1600" height="1000" alt="image" src="https://github.com/user-attachments/assets/e482977d-b220-4c26-9f1e-5b8d2c84a06f" />
+
+<img width="1600" height="1000" alt="image" src="https://github.com/user-attachments/assets/517f4bad-5382-452b-8e4c-886877c22aac" />
+
+<img width="1600" height="1000" alt="image" src="https://github.com/user-attachments/assets/7d2901e2-be6f-4a58-8e80-b1cdfb204436" />
+
+<img width="1482" height="1022" alt="image" src="https://github.com/user-attachments/assets/2b4df7ca-d221-455e-867a-c33b964c6537" />
+
+<img width="1896" height="1150" alt="image" src="https://github.com/user-attachments/assets/b8e46ba5-f1e2-48d3-8aa4-f244bd893de7" />
+   *用文本编辑器打开SSH公钥复制到网页提示的输入框中
+
 
 
 
