@@ -1,8 +1,9 @@
 import os, json, threading, string, random, base64, time, logging, uuid, sqlite3, datetime, signal, requests
-from flask import Blueprint, render_template, jsonify, request, session, g, redirect, url_for, current_app
+from flask import Blueprint, render_template, jsonify, request, session, g, redirect, url_for, current_app, Flask
 from functools import wraps
 from pypinyin import lazy_pinyin
 from datetime import timezone, timedelta
+from celery import Celery
 import oci
 from oci.core.models import (CreateVcnDetails, CreateSubnetDetails, CreateInternetGatewayDetails,
                              UpdateRouteTableDetails, RouteRule, CreatePublicIpDetails, CreateIpv6Details,
@@ -15,7 +16,39 @@ from oci.core.models import (CreateVcnDetails, CreateSubnetDetails, CreateIntern
                              # --- ✨ MODIFICATION END ✨ ---
                              )
 from oci.exceptions import ServiceError
-from app import celery
+# from app import celery  <--- [修复 1] 这一行已被删除/注释
+
+# --------------------
+# [修复 2] 将 app 和 celery 的定义从文件末尾移动到这里
+# --------------------
+app = Flask(__name__)
+app.config.from_pyfile('config.py')
+
+# Celery configuration
+app.config['CELERY_BROKER_URL'] = 'redis://localhost:6379/0'
+app.config['CELERY_RESULT_BACKEND'] = 'redis://localhost:6379/0'
+
+def make_celery(app):
+    celery = Celery(
+        app.import_name,
+        backend=app.config['CELERY_RESULT_BACKEND'],
+        broker=app.config['CELERY_BROKER_URL']
+    )
+    celery.conf.update(app.config)
+
+    class ContextTask(celery.Task):
+        def __call__(self, *args, **kwargs):
+            with app.app_context():
+                return self.run(*args, **kwargs)
+
+    celery.Task = ContextTask
+    return celery
+
+celery = make_celery(app)
+# --------------------
+# [修复 2] 结束
+# --------------------
+
 
 # --- Blueprint Setup ---
 oci_bp = Blueprint('oci', __name__, template_folder='../../templates', static_folder='../../static')
@@ -1551,3 +1584,52 @@ def _snatch_instance_task(task_id, profile_config, alias, details, run_id, auto_
             _db_execute_celery('UPDATE tasks SET result = ? WHERE id = ?', (json.dumps(status_data), task_id))
             last_update_time = current_time
         time.sleep(delay)
+
+
+# Register Blueprints and initialize DB
+# ------------------------------------------------
+# [修复 2] 下面的 app.register_blueprint 和其他启动代码
+# 保持在文件末尾不变
+# ------------------------------------------------
+app.register_blueprint(oci_bp, url_prefix='/oci')
+
+@app.route('/')
+def index():
+    return redirect(url_for('oci.oci_index'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if "user_logged_in" in session:
+        return redirect(url_for('oci.oci_index'))
+        
+    if request.method == 'POST':
+        password = request.form['password']
+        if password == app.config['PANEL_PASSWORD']:
+            session['user_logged_in'] = True
+            session.permanent = True
+            return redirect(url_for('oci.oci_index'))
+        else:
+            return render_template('login.html', error='密码错误')
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('user_logged_in', None)
+    session.pop('oci_profile_alias', None)
+    return redirect(url_for('login'))
+
+@app.before_request
+def make_session_permanent():
+    app.permanent_session_lifetime = timedelta(days=7)
+
+def initialize_app():
+    with app.app_context():
+        init_db()
+        logging.info("--- 应用程序启动 ---")
+        recover_snatching_tasks()
+        
+if __name__ == '__main__':
+    initialize_app()
+    app.run(host='0.0.0.0', port=5003)
+else:
+    initialize_app()
