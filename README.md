@@ -6,7 +6,7 @@
 
 ## ✨一键安装脚本：
 ```bash
-wget https://raw.githubusercontent.com/SIJULY/Oracle/main/install.sh && chmod +x install.sh && ./install.sh
+不再单独提供
 ```
 
 ---
