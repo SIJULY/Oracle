@@ -1,0 +1,51 @@
+services:
+  redis:
+    image: redis:6-alpine
+    restart: always
+    volumes:
+      - redis_data:/data
+
+  web:
+    build: .
+    restart: always
+    command: gunicorn --workers 3 --bind 0.0.0.0:5000 --preload app:app
+    volumes:
+      - .:/app
+    environment:
+      - PANEL_PASSWORD=${PANEL_PASSWORD}
+      - REDIS_URL=redis://redis:6379/0
+      - TZ=Asia/Shanghai  # 设置时区为北京时间
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    restart: always
+    command: celery -A app.celery worker --loglevel=info --concurrency=20
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - TZ=Asia/Shanghai  # 设置时区为北京时间
+    depends_on:
+      - redis
+
+  caddy:
+    image: caddy:latest
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN_OR_IP=${DOMAIN_OR_IP}
+    depends_on:
+      - web
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:
