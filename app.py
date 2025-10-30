@@ -1,6 +1,6 @@
 import os
 import json
-import secrets 
+import secrets
 from flask import Flask, render_template, request, session, redirect, url_for, jsonify
 from celery import Celery
 from celery.signals import worker_ready
@@ -18,7 +18,7 @@ def make_session_permanent():
     """让会话在每次请求后都重置计时器 (滑动窗口)"""
     session.permanent = True
 
-app.secret_key = os.getenv('SECRET_KEY', 'a_very_secret_key_for_the_3in1_panel')
+app.secret_key = os.getenv('SECRET_KEY', 'a_very_secret_key_for_oci_panel') # 更新了密钥描述
 PASSWORD = os.getenv("PANEL_PASSWORD", "You22kme#12345")
 DEBUG_MODE = os.getenv("FLASK_DEBUG", "false").lower() in ['true', '1', 't']
 
@@ -40,7 +40,7 @@ def initialize_app_config():
 
     if 'api_secret_key' not in config or not config.get('api_secret_key'):
         print("首次启动或API密钥不存在，正在生成新的API密钥...")
-        new_key = secrets.token_hex(32) 
+        new_key = secrets.token_hex(32)
         config['api_secret_key'] = new_key
 
         try:
@@ -67,14 +67,10 @@ app.config.update(
 celery = Celery(app.name, broker=app.config['broker_url'])
 celery.conf.update(app.config)
 
-# --- Import and Register Blueprints ---
-from blueprints.aws_panel import aws_bp
-from blueprints.azure_panel import azure_bp, init_db as init_azure_db
+# --- Import and Register Blueprints (仅 OCI) ---
 from blueprints.oci_panel import oci_bp, init_db as init_oci_db, recover_snatching_tasks
 from blueprints.api_bp import api_bp
 
-app.register_blueprint(aws_bp, url_prefix='/aws')
-app.register_blueprint(azure_bp, url_prefix='/azure')
 app.register_blueprint(oci_bp, url_prefix='/oci')
 app.register_blueprint(api_bp, url_prefix='/api/v1/oci')
 
@@ -110,10 +106,8 @@ def logout():
 def index():
     if 'user_logged_in' not in session:
         return redirect(url_for('login'))
-    # --- 这里是您要修改的地方 ---
-    # 原来是: return redirect(url_for('aws.aws_index'))
-    # 现在改为:
-    return redirect(url_for('oci.oci_index')) 
+    # --- 路由已指向 OCI 首页 ---
+    return redirect(url_for('oci.oci_index'))
 
 @app.route('/api/get-app-api-key')
 def get_app_api_key():
@@ -128,17 +122,16 @@ def get_app_api_key():
                 config = json.load(f)
                 api_key = config.get('api_secret_key')
         except (IOError, json.JSONDecodeError):
-            pass 
+            pass
 
     if api_key:
         return jsonify({"api_key": api_key})
     else:
         return jsonify({"error": "未能在服务器上找到或配置API密钥。"}), 500
 
-# --- Database Initialization ---
+# --- Database Initialization (仅 OCI) ---
 with app.app_context():
     print("Checking and initializing databases if necessary...")
-    init_azure_db()
     init_oci_db()
     # 恢复逻辑已移至 on_worker_ready 函数中
 
