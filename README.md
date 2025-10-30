@@ -75,12 +75,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/SIJULY/Oracle/main/docker-in
 
 <img width="1896" height="1150" alt="image" src="https://github.com/user-attachments/assets/b8e46ba5-f1e2-48d3-8aa4-f244bd893de7" />
 
-  **用文本编辑器打开SSH公钥复制到网页提示的输入框中**：
 
 
 
 
-
-
----
 
