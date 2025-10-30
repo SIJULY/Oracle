@@ -1,4 +1,3 @@
-
 # /app/blueprints/api_bp.py (完整替换代码)
 
 import os
@@ -19,11 +18,8 @@ from .oci_panel import (
     _ensure_subnet_in_profile,
     oci
 )
-from .azure_panel import (
-    _create_vm_task,
-    _vm_action_task,
-    _change_ip_task
-)
+
+# --- (已删除 azure_panel 的导入) ---
 
 api_bp = Blueprint('api', __name__)
 
