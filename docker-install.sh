@@ -6,7 +6,8 @@
 
 # --- 配置 ---
 INSTALL_DIR="/opt/cloud_manager"
-REPO_URL="https://github.com/SIJULY/cloud_manager.git"
+# *** 这是唯一的修改，已指向正确的 Oracle 仓库 ***
+REPO_URL="https://github.com/SIJULY/Oracle.git"
 
 # --- 辅助函数 ---
 print_info() { echo -e "\e[34m[信息]\e[0m $1"; }
