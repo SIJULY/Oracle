@@ -6,7 +6,7 @@
 
 ## ✨一键安装脚本：
 ```bash
-不再单独提供
+bash <(curl -fsSL https://raw.githubusercontent.com/SIJULY/Oracle/main/docker-install.sh)
 ```
 
 ---
