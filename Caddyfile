@@ -1,0 +1,5 @@
+# 文件名: Caddyfile
+
+{$DOMAIN_OR_IP} {
+    reverse_proxy web:5000
+}
